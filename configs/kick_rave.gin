@@ -1,0 +1,45 @@
+# RAVE configuration for hardstyle kick drum synthesis
+# Target: 44100 Hz, 0.4-second single-shot kicks
+#
+# Architecture rationale:
+#   RATIOS=[4,4,2]  → total compression = N_BAND × 32 = 512 samples/frame
+#                     hop time ≈ 11.6 ms/frame → ~34 frames per 0.4 s kick
+#                     (default [4,4,4,2]=2048 gives only ~8 frames — too coarse for transients)
+#   LATENT_SIZE=8   → kicks are spectrally simpler than speech; 8 dims is sufficient
+#   CAPACITY=48     → medium capacity; trains faster on small datasets than default 64
+#   N_BAND=16       → standard PQMF resolution, good frequency coverage at 44100 Hz
+
+import rave
+import rave.blocks
+import rave.core
+import rave.discriminator
+import rave.model
+import rave.pqmf
+import rave.resample
+import cached_conv
+
+# === Macros ===
+CAPACITY = 48
+LATENT_SIZE = 8
+N_BAND = 16
+RATIOS = [4, 4, 2]
+SR = 44100
+
+# === Model ===
+rave.model.RAVE.capacity = %CAPACITY
+rave.model.RAVE.latent_size = %LATENT_SIZE
+rave.model.RAVE.n_band = %N_BAND
+rave.model.RAVE.ratios = %RATIOS
+rave.model.RAVE.sr = %SR
+rave.model.RAVE.use_noise = True
+rave.model.RAVE.noise_augmentation = 0
+rave.model.RAVE.loud_stride = 1
+rave.model.RAVE.encoder_type = "residual"
+rave.model.RAVE.decoder_type = "residual"
+
+# 3 discriminator scales matching len(RATIOS)=3
+rave.model.RAVE.discriminator_factors = [1, 1, 1]
+
+# Training chunk size — nearest power-of-2 to one kick (17640 samples)
+# Each training chunk will contain approximately one kick
+rave.core.AudioDataset.n_signal = 16384

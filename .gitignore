@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+env/
+.venv/
+
+# Data — don't commit large audio datasets or LMDB training databases
+data/processed/
+data/*.mdb/
+data/*.mdb-lock/
+
+# Training outputs (checkpoints, logs, exported models)
+outputs/
+
+# Audio files — drop your own kicks in data/raw/ but don't commit them
+*.wav
+*.mp3
+*.flac
+*.aiff
+*.aif
+*.ogg
+
+# Keep the raw dir placeholder
+!data/raw/.gitkeep
+
+# PyTorch
+*.pt
+*.pth
+*.ts
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Jupyter
+.ipynb_checkpoints/
