@@ -136,8 +136,9 @@ class LivePlot:
             self.fig.canvas.flush_events()
         else:
             epoch = self.epochs[-1] if self.epochs else 0
-            self.fig.savefig(self.out_dir / f"plot_ep{epoch:04d}.png", dpi=100)
-            print(f"  Plot saved → {self.out_dir / f'plot_ep{epoch:04d}.png'}")
+            plot_path = self.out_dir / f"plot_ep{epoch:04d}.png"
+            self.fig.savefig(plot_path, dpi=100)
+            print(f"  Plot saved → {plot_path}")
 
 
 # ── Training loop ──────────────────────────────────────────────────────────
@@ -217,25 +218,16 @@ def main():
     start_epoch = 1
     ckpt        = None
 
-    answer = input("\nLoad an existing checkpoint? [y/n]: ").strip().lower()
+    answer = input("\nLoad latest checkpoint? [y/n]: ").strip().lower()
     if answer == "y":
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        ckpt_path = filedialog.askopenfilename(
-            title="Select checkpoint",
-            initialdir=str(out_dir),
-            filetypes=[("PyTorch checkpoint", "*.pt"), ("All files", "*.*")],
-        )
-        root.destroy()
-        if ckpt_path:
+        candidates = sorted(out_dir.glob("kick_vae_ep*.pt"))
+        if candidates:
+            ckpt_path = candidates[-1]
             ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             saved_mode = ckpt.get("args", {}).get("mode", "unknown") if isinstance(ckpt, dict) else "unknown"
-            print(f"  Checkpoint saved as mode: {saved_mode}")
+            print(f"  Loaded {ckpt_path.name}  (saved mode: {saved_mode})")
         else:
-            print("  No file selected — starting fresh.")
+            print(f"  No checkpoints found in {out_dir} — starting fresh.")
 
     # ── Mode selection ─────────────────────────────────────────────────────
     valid_modes = ("ae", "vae_fixed", "vae")
@@ -294,9 +286,6 @@ def main():
         plot.record(epoch, train_recon, val_recon)
         if epoch % args.plot_every == 0:
             plot.redraw(model, fixed_sample, device)
-
-        # Save checkpoint every 10 epochs
-        if epoch % 10 == 0:
             torch.save({
                 "epoch": epoch,
                 "model_state": model.state_dict(),

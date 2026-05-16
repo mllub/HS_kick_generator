@@ -26,6 +26,7 @@ class KickVAE(nn.Module):
         n_mels: int = 128,
         n_frames: int = 69,
         enc_channels: list[int] = [64, 128, 256, 512],
+        dropout: float = 0.15,
     ):
         super().__init__()
         assert mode in ("ae", "vae_fixed", "vae"), f"Unknown mode '{mode}'"
@@ -42,6 +43,7 @@ class KickVAE(nn.Module):
                 nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1),
                 nn.BatchNorm2d(out_ch),
                 nn.LeakyReLU(0.2, inplace=True),
+                nn.Dropout2d(dropout),
             ]
             in_ch = out_ch
         self.enc_conv = nn.Sequential(*enc_layers)
@@ -59,8 +61,8 @@ class KickVAE(nn.Module):
         # --- Decoder FC + conv blocks ---
         self.fc_dec = nn.Linear(latent_dim, flat_size)
 
-        dec_in_channels = list(reversed(enc_channels))       # e.g. [128, 64, 32]
-        dec_out_channels = dec_in_channels[1:] + [1]          # e.g. [64, 32, 1]
+        dec_in_channels = list(reversed(enc_channels))       # e.g. [512, 256, 128, 64]
+        dec_out_channels = dec_in_channels[1:] + [1]          # e.g. [256, 128, 64, 1]
 
         dec_layers: list[nn.Module] = []
         for i, (in_c, out_c) in enumerate(zip(dec_in_channels, dec_out_channels)):
@@ -70,7 +72,11 @@ class KickVAE(nn.Module):
                                    padding=1, output_padding=1)
             )
             if not is_last:
-                dec_layers += [nn.BatchNorm2d(out_c), nn.LeakyReLU(0.2, inplace=True)]
+                dec_layers += [
+                    nn.BatchNorm2d(out_c),
+                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.Dropout2d(dropout),
+                ]
         self.dec_conv = nn.Sequential(*dec_layers)
 
     # ------------------------------------------------------------------
