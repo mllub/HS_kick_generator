@@ -22,7 +22,9 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader, random_split
 import torchaudio.transforms as T
 import matplotlib
-matplotlib.use("TkAgg")
+import os as _os
+_has_display = bool(_os.environ.get("DISPLAY") or _os.name == "nt")
+matplotlib.use("TkAgg" if _has_display else "Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -63,8 +65,11 @@ def to_log_mel(waveforms: torch.Tensor, mel_tf: T.MelSpectrogram) -> torch.Tenso
 # ── Live plot ──────────────────────────────────────────────────────────────
 
 class LivePlot:
-    def __init__(self, mode: str):
-        plt.ion()
+    def __init__(self, mode: str, out_dir: Path):
+        self.interactive = _has_display
+        self.out_dir = out_dir
+        if self.interactive:
+            plt.ion()
         self.fig, (self.ax_loss, self.ax_orig, self.ax_recon) = plt.subplots(
             1, 3, figsize=(16, 4)
         )
@@ -126,8 +131,13 @@ class LivePlot:
 
         model.train()
         self.fig.tight_layout()
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
+        if self.interactive:
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
+        else:
+            epoch = self.epochs[-1] if self.epochs else 0
+            self.fig.savefig(self.out_dir / f"plot_ep{epoch:04d}.png", dpi=100)
+            print(f"  Plot saved → {self.out_dir / f'plot_ep{epoch:04d}.png'}")
 
 
 # ── Training loop ──────────────────────────────────────────────────────────
@@ -271,7 +281,7 @@ def main():
     rng_idx = torch.randint(len(train_ds), (1,)).item()
     fixed_sample = train_ds[rng_idx][0]              # (1, n_mels, n_frames)
 
-    plot = LivePlot(chosen_mode)
+    plot = LivePlot(chosen_mode, out_dir)
     print(f"\n{'Epoch':>6}  {'Train recon':>12}  {'Train KL':>10}  {'Val recon':>10}  {'Val KL':>8}")
     print("-" * 58)
 
@@ -296,8 +306,12 @@ def main():
 
     torch.save(model.state_dict(), out_dir / "kick_vae_final.pt")
     print(f"\nSaved final model → {out_dir / 'kick_vae_final.pt'}")
-    plt.ioff()
-    plt.show()
+    if _has_display:
+        plt.ioff()
+        plt.show()
+    else:
+        plot.fig.savefig(out_dir / "plot_final.png", dpi=100)
+        print(f"Final plot saved → {out_dir / 'plot_final.png'}")
 
 
 if __name__ == "__main__":
