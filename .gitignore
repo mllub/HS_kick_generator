@@ -29,6 +29,9 @@ outputs/
 # Keep the raw dir placeholder
 !data/raw/.gitkeep
 
+# Tensor dataset
+data/processed/*.pt
+
 # PyTorch
 *.pt
 *.pth

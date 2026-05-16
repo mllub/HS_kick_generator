@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/Menno/anaconda3/envs/hs-kick/Lib/site-packages/rave/configs/**)",
+      "Bash(\"C:\\\\Users\\\\Menno\\\\anaconda3\\\\envs\\\\hs-kick\\\\python.exe\" -c \"import inspect; from rave.dataset import AudioDataset; print\\(inspect.signature\\(AudioDataset.__init__\\)\\)\")",
+      "Bash(\"C:\\\\Users\\\\Menno\\\\anaconda3\\\\envs\\\\hs-kick\\\\python.exe\" -c \"import inspect; from rave import dataset; print\\(inspect.signature\\(dataset.get_dataset\\)\\)\")",
+      "Bash(rm \"C:\\\\Users\\\\Menno\\\\hardstyle-kick-rave\\\\scripts\\\\generate.py\" \"C:\\\\Users\\\\Menno\\\\hardstyle-kick-rave\\\\scripts\\\\interpolate.py\" \"C:\\\\Users\\\\Menno\\\\hardstyle-kick-rave\\\\scripts\\\\export.py\")"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\Menno\\hardstyle-kick-rave\\scripts"
+    ]
+  }
+}
