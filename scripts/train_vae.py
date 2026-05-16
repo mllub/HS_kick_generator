@@ -70,7 +70,7 @@ class LivePlot:
         )
 
         self.ax_loss.set_xlabel("Epoch")
-        self.ax_loss.set_ylabel("Reconstruction loss (MSE)")
+        self.ax_loss.set_ylabel("Reconstruction loss (L1)")
         self.ax_loss.set_title(f"Loss  —  mode: {mode}")
         self.train_line, = self.ax_loss.plot([], [], label="Train", color="steelblue")
         self.val_line,   = self.ax_loss.plot([], [], label="Val",   color="tomato")
@@ -141,7 +141,7 @@ def run_epoch(model: KickVAE, loader: DataLoader, optimizer, device: torch.devic
         for (x,) in loader:
             x = x.to(device)
             recon, mu, logvar = model(x)
-            recon_loss = F.mse_loss(recon, x)
+            recon_loss = F.l1_loss(recon, x)
             kl_loss    = model.kl_loss(mu, logvar)
             loss       = recon_loss + beta * kl_loss
             if train:
@@ -159,7 +159,7 @@ def main():
     parser.add_argument("--data",       default="data/processed/kicks.pt")
     parser.add_argument("--out",        default="outputs/vae",     help="Checkpoint directory")
     parser.add_argument("--mode",       default="vae",             choices=["ae", "vae_fixed", "vae"])
-    parser.add_argument("--latent-dim", type=int,   default=32)
+    parser.add_argument("--latent-dim", type=int,   default=128)
     parser.add_argument("--epochs",     type=int,   default=200)
     parser.add_argument("--batch-size", type=int,   default=64)
     parser.add_argument("--lr",         type=float, default=1e-3)

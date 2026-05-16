@@ -22,10 +22,10 @@ class KickVAE(nn.Module):
     def __init__(
         self,
         mode: ModeType = "vae",
-        latent_dim: int = 32,
+        latent_dim: int = 128,
         n_mels: int = 128,
         n_frames: int = 69,
-        enc_channels: list[int] = [32, 64, 128],
+        enc_channels: list[int] = [64, 128, 256, 512],
     ):
         super().__init__()
         assert mode in ("ae", "vae_fixed", "vae"), f"Unknown mode '{mode}'"
