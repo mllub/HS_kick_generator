@@ -23,7 +23,7 @@ import argparse
 from pathlib import Path
 
 import torch
-import torchaudio
+import soundfile as sf
 import torchaudio.transforms as T
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -61,14 +61,9 @@ def denormalise(x: torch.Tensor, s_min: float, s_max: float) -> torch.Tensor:
     return (x + 1) / 2 * (s_max - s_min + 1e-9) + s_min
 
 
-def build_vocoder(device: torch.device):
-    inverse_mel = T.InverseMelScale(
-        n_stft=N_STFT,
-        n_mels=N_MELS,
-        sample_rate=TARGET_SR,
-        f_min=0.0,
-        f_max=TARGET_SR / 2,
-    ).to(device)
+def build_vocoder(mel_tf: T.MelSpectrogram, device: torch.device):
+    fb      = mel_tf.mel_scale.fb                        # (n_stft, n_mels)
+    fb_pinv = torch.linalg.pinv(fb.T).to(device)        # (n_stft, n_mels)
 
     griffin_lim = T.GriffinLim(
         n_fft=N_FFT,
@@ -77,22 +72,22 @@ def build_vocoder(device: torch.device):
         n_iter=64,
     ).to(device)
 
-    return inverse_mel, griffin_lim
+    return fb_pinv, griffin_lim
 
 
 def mel_to_audio(
     mel_norm: torch.Tensor,
     s_min: float,
     s_max: float,
-    inverse_mel: T.InverseMelScale,
+    fb_pinv: torch.Tensor,
     griffin_lim: T.GriffinLim,
 ) -> torch.Tensor:
     """(1, 1, n_mels, n_frames) normalised log-mel  →  (T,) waveform."""
-    log_mel = denormalise(mel_norm, s_min, s_max)       # log amplitude
-    mel_power = torch.exp(log_mel).squeeze(0)           # (1, n_mels, n_frames) power
-    linear = inverse_mel(mel_power)                     # (1, n_stft, n_frames)
-    wav = griffin_lim(linear)                           # (1, T)
-    return wav.squeeze(0)                               # (T,)
+    log_mel   = denormalise(mel_norm, s_min, s_max)      # log amplitude
+    mel_power = torch.exp(log_mel).squeeze(0)            # (1, n_mels, n_frames) power
+    linear    = torch.relu(fb_pinv @ mel_power)          # (1, n_stft, n_frames)
+    wav       = griffin_lim(linear)                      # (1, T)
+    return wav.squeeze(0)                                # (T,)
 
 
 def main():
@@ -115,15 +110,20 @@ def main():
     if args.checkpoint:
         ckpt_path = Path(args.checkpoint)
     else:
-        candidates = sorted(Path(args.ckpt_dir).glob("kick_vae_ep*.pt"))
-        if not candidates:
+        ckpt_dir   = Path(args.ckpt_dir)
+        candidates = sorted(ckpt_dir.glob("kick_vae_ep*.pt"))
+        final      = ckpt_dir / "kick_vae_final.pt"
+        if final.exists():
+            ckpt_path = final
+        elif candidates:
+            ckpt_path = candidates[-1]
+        else:
             print(f"No checkpoints found in {args.ckpt_dir}")
             sys.exit(1)
-        ckpt_path = candidates[-1]
     print(f"Checkpoint : {ckpt_path}")
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    if isinstance(ckpt, dict):
+    if isinstance(ckpt, dict) and "model_state" in ckpt:
         saved_args = ckpt.get("args", {})
         mode       = args.mode or saved_args.get("mode", "vae")
         latent_dim = saved_args.get("latent_dim", args.latent_dim)
@@ -159,39 +159,47 @@ def main():
     model.eval()
 
     # ── Vocoder ───────────────────────────────────────────────────────────
-    inverse_mel, griffin_lim = build_vocoder(device)
+    fb_pinv, griffin_lim = build_vocoder(mel_tf, device)
 
     # ── Generate ──────────────────────────────────────────────────────────
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    def vocode_batch(mel_batch: torch.Tensor, tag: str) -> None:
+        print(f"\nVocoding {len(mel_batch)} {tag} samples ...")
+        for i in range(len(mel_batch)):
+            wav  = mel_to_audio(mel_batch[i].unsqueeze(0), s_min, s_max, fb_pinv, griffin_lim)
+            peak = wav.abs().max().clamp(min=1e-9)
+            wav  = wav / peak * 0.9
+            out_path = out_dir / f"kick_{tag}_{i:03d}.wav"
+            sf.write(str(out_path), wav.cpu().numpy(), TARGET_SR)
+            print(f"  Saved {out_path}")
+
     with torch.no_grad():
-        if args.reconstruct:
-            # Pick n random training samples, encode, decode
-            indices = torch.randperm(len(waveforms))[: args.n]
-            batch   = waveforms[indices].to(device)
-            log_mel = torch.log(mel_tf(batch.squeeze(1)) + LOG_EPS).unsqueeze(1)
-            log_mel = 2 * (log_mel - s_min) / (s_max - s_min + 1e-9) - 1
-            mu, logvar = model.encode(log_mel)
-            mel_hat, _, _ = model(log_mel)
-            tag = "recon"
-        else:
-            # Sample z ~ N(0, I) and decode
-            z       = torch.randn(args.n, latent_dim, device=device)
-            mel_hat = model.decode(z)
-            tag     = "gen"
+        # Pick 8 random dataset samples — used for both orig and recon
+        indices = torch.randperm(len(waveforms))[: args.n]
+        batch   = waveforms[indices].to(device)
 
-    print(f"\nVocodin {args.n} samples ...")
-    for i in range(args.n):
-        wav = mel_to_audio(mel_hat[i].unsqueeze(0), s_min, s_max, inverse_mel, griffin_lim)
-        # Peak-normalise
-        peak = wav.abs().max().clamp(min=1e-9)
-        wav  = wav / peak * 0.9
-        out_path = out_dir / f"kick_{tag}_{i:03d}.wav"
-        torchaudio.save(str(out_path), wav.unsqueeze(0).cpu(), TARGET_SR)
-        print(f"  Saved {out_path}")
+        # Save originals
+        print(f"\nSaving {args.n} original samples ...")
+        for i, wav in enumerate(batch):
+            audio = wav.squeeze(0).cpu().numpy()
+            peak  = abs(audio).max().clip(1e-9)
+            sf.write(str(out_dir / f"kick_orig_{i:03d}.wav"), audio / peak * 0.9, TARGET_SR)
+            print(f"  Saved kick_orig_{i:03d}.wav")
 
-    print(f"\nDone. {args.n} WAV files written to {out_dir}/")
+        # Reconstruction: encode → decode the same samples
+        log_mel = torch.log(mel_tf(batch.squeeze(1)) + LOG_EPS).unsqueeze(1)
+        log_mel = 2 * (log_mel - s_min) / (s_max - s_min + 1e-9) - 1
+        mel_recon, _, _ = model(log_mel)
+        vocode_batch(mel_recon, "recon")
+
+        # Random generation: z ~ N(0, I)
+        z       = torch.randn(args.n, latent_dim, device=device)
+        mel_gen = model.decode(z)
+        vocode_batch(mel_gen, "gen")
+
+    print(f"\nDone. WAV files written to {out_dir}/")
 
 
 if __name__ == "__main__":

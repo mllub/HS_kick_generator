@@ -70,9 +70,11 @@ class LivePlot:
         self.out_dir = out_dir
         if self.interactive:
             plt.ion()
-        self.fig, (self.ax_loss, self.ax_orig, self.ax_recon) = plt.subplots(
-            1, 3, figsize=(16, 4)
-        )
+        self.fig, axes = plt.subplots(2, 3, figsize=(16, 8))
+        (self.ax_loss, self.ax_orig,     self.ax_recon), \
+        (self.ax_blank, self.ax_val_orig, self.ax_val_recon) = axes
+
+        self.ax_blank.axis("off")
 
         self.ax_loss.set_xlabel("Epoch")
         self.ax_loss.set_ylabel("Reconstruction loss (L1)")
@@ -81,17 +83,9 @@ class LivePlot:
         self.val_line,   = self.ax_loss.plot([], [], label="Val",   color="tomato")
         self.ax_loss.legend()
 
-        self.ax_orig.set_title("Original mel")
-        self.ax_orig.set_xlabel("Frame")
-        self.ax_orig.set_ylabel("Mel bin")
-
-        self.ax_recon.set_title("Reconstructed mel")
-        self.ax_recon.set_xlabel("Frame")
-        self.ax_recon.set_ylabel("Mel bin")
-
         self.fig.tight_layout()
 
-        self.epochs: list[int]        = []
+        self.epochs: list[int]         = []
         self.train_losses: list[float] = []
         self.val_losses:   list[float] = []
 
@@ -100,7 +94,8 @@ class LivePlot:
         self.train_losses.append(train_recon)
         self.val_losses.append(val_recon)
 
-    def redraw(self, model: "KickVAE", sample: torch.Tensor, device: torch.device) -> None:
+    def redraw(self, model: "KickVAE", train_sample: torch.Tensor,
+               val_sample: torch.Tensor, device: torch.device) -> None:
         # --- loss plot ---
         self.train_line.set_data(self.epochs, self.train_losses)
         self.val_line.set_data(self.epochs, self.val_losses)
@@ -110,24 +105,25 @@ class LivePlot:
         # --- mel plots ---
         model.eval()
         with torch.no_grad():
-            x = sample.unsqueeze(0).to(device)          # (1, 1, n_mels, n_frames)
-            recon, _, _ = model(x)
+            train_recon, _, _ = model(train_sample.unsqueeze(0).to(device))
+            val_recon,   _, _ = model(val_sample.unsqueeze(0).to(device))
 
-        orig_np  = sample.squeeze().cpu().numpy()        # (n_mels, n_frames)
-        recon_np = recon.squeeze().cpu().numpy()
-
-        vmin = orig_np.min()
-        vmax = orig_np.max()
-
-        for ax, img, title in [
-            (self.ax_orig,  orig_np,  "Original mel"),
-            (self.ax_recon, recon_np, "Reconstructed mel"),
+        for (ax_orig, ax_recon, orig, recon, row_label) in [
+            (self.ax_orig,     self.ax_recon,     train_sample, train_recon, "Train"),
+            (self.ax_val_orig, self.ax_val_recon, val_sample,   val_recon,   "Val"),
         ]:
-            ax.cla()
-            ax.imshow(img, origin="lower", aspect="auto", vmin=vmin, vmax=vmax, cmap="magma")
-            ax.set_title(title)
-            ax.set_xlabel("Frame")
-            ax.set_ylabel("Mel bin")
+            orig_np  = orig.squeeze().cpu().numpy()
+            recon_np = recon.squeeze().cpu().numpy()
+            vmin, vmax = orig_np.min(), orig_np.max()
+            for ax, img, title in [
+                (ax_orig,  orig_np,  f"{row_label} — original"),
+                (ax_recon, recon_np, f"{row_label} — reconstruction"),
+            ]:
+                ax.cla()
+                ax.imshow(img, origin="lower", aspect="auto", vmin=vmin, vmax=vmax, cmap="magma")
+                ax.set_title(title)
+                ax.set_xlabel("Frame")
+                ax.set_ylabel("Mel bin")
 
         model.train()
         self.fig.tight_layout()
@@ -173,7 +169,8 @@ def main():
     parser.add_argument("--latent-dim", type=int,   default=256)
     parser.add_argument("--epochs",     type=int,   default=200)
     parser.add_argument("--batch-size", type=int,   default=64)
-    parser.add_argument("--lr",         type=float, default=1e-3)
+    parser.add_argument("--lr",           type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=0.0,    help="AdamW weight decay")
     parser.add_argument("--beta",       type=float, default=1.0,   help="KL weight (beta-VAE)")
     parser.add_argument("--val-split",  type=float, default=0.1,   help="Fraction of data for validation")
     parser.add_argument("--plot-every", type=int,   default=5,     help="Update plot every N epochs")
@@ -256,7 +253,7 @@ def main():
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Parameters : {n_params:,}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     if ckpt is not None:
         if isinstance(ckpt, dict) and "model_state" in ckpt:
@@ -269,9 +266,11 @@ def main():
             print("  Loaded weights from final checkpoint")
 
     # ── Training ───────────────────────────────────────────────────────────
-    # Fixed random sample used for the mel reconstruction subplot
-    rng_idx = torch.randint(len(train_ds), (1,)).item()
-    fixed_sample = train_ds[rng_idx][0]              # (1, n_mels, n_frames)
+    # Fixed random samples used for the mel reconstruction subplots
+    train_rng_idx = torch.randint(len(train_ds), (1,)).item()
+    val_rng_idx   = torch.randint(len(val_ds),   (1,)).item()
+    fixed_sample     = train_ds[train_rng_idx][0]    # (1, n_mels, n_frames)
+    fixed_val_sample = val_ds[val_rng_idx][0]        # (1, n_mels, n_frames)
 
     plot = LivePlot(chosen_mode, out_dir)
     print(f"\n{'Epoch':>6}  {'Train recon':>12}  {'Train KL':>10}  {'Val recon':>10}  {'Val KL':>8}")
@@ -285,7 +284,7 @@ def main():
 
         plot.record(epoch, train_recon, val_recon)
         if epoch % args.plot_every == 0:
-            plot.redraw(model, fixed_sample, device)
+            plot.redraw(model, fixed_sample, fixed_val_sample, device)
             torch.save({
                 "epoch": epoch,
                 "model_state": model.state_dict(),

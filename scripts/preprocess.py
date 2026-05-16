@@ -7,7 +7,7 @@ Steps per file:
   3. Trim or zero-pad to exactly 0.4 s (17640 samples)
   4. Peak-normalize to -1 dBFS
   5. Save 24-bit WAV to data/processed/
-  6. Generate augmented variants (polarity flip + bell-filtered copies)
+  6. Generate augmented variants (EQ, clipping, tok+tail combinations)
 
 Usage:
     python scripts/preprocess.py
@@ -72,6 +72,11 @@ _GAIN_RANGE = 7.0       # ±dB
 _Q_MIN, _Q_MAX = 0.5, 3.0
 _CLIP_THRESHOLD = 0.8   # fraction of peak before normalization
 
+# Tok+tail crossfade parameters
+_TOK_SECONDS  = 4 / 50   # 0.08 s — duration of the tok region
+_FADE_SECONDS = 1 / 50   # 0.02 s — crossfade duration
+_N_TOK_TAIL   = 5        # tok+tail combinations per original sample
+
 
 def _random_eq(audio: np.ndarray, sr: int, rng: np.random.Generator) -> np.ndarray:
     """Apply _N_BELL_BANDS random peaking filters log-uniformly across 20–20k Hz."""
@@ -90,26 +95,64 @@ def _clip_distort(audio: np.ndarray) -> np.ndarray:
     return peak_normalize(np.clip(audio, -threshold, threshold))
 
 
+def _tok_tail_combine(tok_audio: np.ndarray, tail_audio: np.ndarray, sr: int) -> np.ndarray:
+    """Crossfade tok of one kick with the tail of another.
+
+    0 … tok_end          : tok only (gain = 1)
+    tok_end … fade_end   : linear crossfade tok→tail
+    fade_end … end       : tail only (gain = 1)
+    """
+    n        = len(tok_audio)
+    tok_end  = int(sr * _TOK_SECONDS)
+    fade_len = int(sr * _FADE_SECONDS)
+    fade_end = min(tok_end + fade_len, n)
+
+    ramp_down = np.linspace(1.0, 0.0, fade_end - tok_end, dtype=np.float32)
+    ramp_up   = 1.0 - ramp_down
+
+    tok_env  = np.ones(n,  dtype=np.float32)
+    tail_env = np.zeros(n, dtype=np.float32)
+
+    tok_env[tok_end:fade_end]  = ramp_down
+    tok_env[fade_end:]         = 0.0
+    tail_env[tok_end:fade_end] = ramp_up
+    tail_env[fade_end:]        = 1.0
+
+    combined = tok_audio * tok_env + tail_audio * tail_env
+    return peak_normalize(combined)
+
+
+def tok_tail_augment(
+    originals: list[np.ndarray],
+    sr: int,
+    rng: np.random.Generator,
+    n_variants: int = _N_TOK_TAIL,
+) -> list[np.ndarray]:
+    """For every original sample produce n_variants tok+tail hybrids."""
+    variants = []
+    n = len(originals)
+    for audio in originals:
+        for _ in range(n_variants):
+            tok_src  = originals[rng.integers(n)]
+            tail_src = originals[rng.integers(n)]
+            variants.append(_tok_tail_combine(tok_src, tail_src, sr))
+    return variants
+
+
 def augment(audio: np.ndarray, sr: int, rng: np.random.Generator) -> list[tuple[str, np.ndarray]]:
     """Return (suffix, audio) pairs for each augmented variant.
 
     Per input file:
-      - 5 EQ realizations of the original + clipped version of each
-      - 1 polarity flip
-      - 5 EQ realizations of the polarity flip + clipped version of each
-    Total: 21 augmented files per source sample.
+      - 5 EQ realizations of the original
+      - clipped version of each EQ realization
+    Total: 10 augmented files per source sample.
     """
     variants: list[tuple[str, np.ndarray]] = []
 
-    polarity = -audio
-
-    for base, prefix in [(audio, "_aug_eq"), (polarity, "_aug_pol_eq")]:
-        if prefix == "_aug_pol_eq":
-            variants.append(("_aug_pol", polarity))
-        for i in range(_N_EQ_VARIANTS):
-            eq_audio = _random_eq(base, sr, rng)
-            variants.append((f"{prefix}{i + 1}", eq_audio))
-            variants.append((f"{prefix}{i + 1}_clip", _clip_distort(eq_audio)))
+    for i in range(_N_EQ_VARIANTS):
+        eq_audio = _random_eq(audio, sr, rng)
+        variants.append((f"_aug_eq{i + 1}", eq_audio))
+        variants.append((f"_aug_eq{i + 1}_clip", _clip_distort(eq_audio)))
 
     return variants
 
@@ -160,21 +203,25 @@ def main():
     target_samples = int(TARGET_SR * duration)
 
     if not args.no_augment:
-        answer = input("Run augmentation? (21 variants per file: EQ, clipping, polarity) [y/n]: ").strip().lower()
+        answer = input("Run augmentation? (10 EQ/clip + 5 tok+tail variants per file) [y/n]: ").strip().lower()
         if answer != "y":
             args.no_augment = True
 
     save_wavs = input("Save processed WAV files to disk? [y/n]: ").strip().lower() == "y"
 
-    aug_label = "disabled" if args.no_augment else "21 variants per file (5 EQ + 5 EQ+clip + polarity + 5 pol EQ + 5 pol EQ+clip)"
+    aug_label = "disabled" if args.no_augment else "10 EQ/clip + 5 tok+tail variants per file"
     print(f"Processing {len(files)} files → {target_samples} samples ({duration} s) @ {TARGET_SR} Hz  (augmentation: {aug_label})")
     errors = 0
-    all_audio = []
+    all_audio  = []
+    orig_audio = []   # originals only — used for tok+tail pool
+    global_rng = np.random.default_rng(args.seed)
+
     for i, f in enumerate(files, 1):
         try:
             audio = process_audio(f, target_samples)
             print(f"  [{i:3d}/{len(files)}] {f.name}")
             all_audio.append(audio)
+            orig_audio.append(audio)
 
             if save_wavs:
                 sf.write(str(processed_dir / f"{f.stem}.wav"), audio, TARGET_SR, subtype="PCM_24")
@@ -190,7 +237,17 @@ def main():
             errors += 1
 
     processed = len(files) - errors
-    aug_count = 0 if args.no_augment else processed * 21
+
+    # Tok+tail augmentation — requires the full pool of originals
+    tt_count = 0
+    if not args.no_augment and len(orig_audio) >= 2:
+        print(f"\nGenerating tok+tail combinations ({_N_TOK_TAIL} per original) ...")
+        tt_variants = tok_tail_augment(orig_audio, TARGET_SR, global_rng)
+        all_audio.extend(tt_variants)
+        tt_count = len(tt_variants)
+        print(f"  +{tt_count} tok+tail samples")
+
+    aug_count = 0 if args.no_augment else processed * 10 + tt_count
     print(f"\nDone. {processed} processed, {errors} errors (+{aug_count} augmented) — {len(all_audio)} total")
 
     if not all_audio:
