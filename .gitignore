@@ -11,7 +11,8 @@ env/
 .venv/
 
 # Data — don't commit large audio datasets or LMDB training databases
-data/processed/
+data/processed/*
+!data/processed/kicks.pt
 data/*.mdb/
 data/*.mdb-lock/
 
@@ -29,8 +30,8 @@ outputs/
 # Keep the raw dir placeholder
 !data/raw/.gitkeep
 
-# Tensor dataset
-data/processed/*.pt
+# Tensor dataset — excluded from gitignore so kicks.pt is tracked
+# data/processed/*.pt
 
 # PyTorch
 *.pt
