@@ -20,6 +20,7 @@ data/*.mdb-lock/
 outputs/*
 !outputs/vae/
 outputs/vae/*
+!outputs/vae/.gitkeep
 !outputs/vae/kick_vae_final.pt
 
 # Audio files — drop your own kicks in data/raw/ but don't commit them
