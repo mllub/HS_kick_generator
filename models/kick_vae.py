@@ -26,7 +26,7 @@ class KickVAE(nn.Module):
         n_mels: int = 128,
         n_frames: int = 69,
         enc_channels: list[int] = [64, 128, 256, 512],
-        dropout: float = 0.15,
+        dropout: float = 0.05,
     ):
         super().__init__()
         assert mode in ("ae", "vae_fixed", "vae"), f"Unknown mode '{mode}'"
@@ -40,9 +40,9 @@ class KickVAE(nn.Module):
         in_ch = 1
         for out_ch in enc_channels:
             enc_layers += [
-                nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1),
+                nn.Conv2d(in_ch, out_ch, kernel_size=10, stride=2, padding=4),
                 nn.BatchNorm2d(out_ch),
-                nn.LeakyReLU(0.2, inplace=True),
+                nn.SiLU(),
                 nn.Dropout2d(dropout),
             ]
             in_ch = out_ch
@@ -68,13 +68,13 @@ class KickVAE(nn.Module):
         for i, (in_c, out_c) in enumerate(zip(dec_in_channels, dec_out_channels)):
             is_last = i == len(dec_in_channels) - 1
             dec_layers.append(
-                nn.ConvTranspose2d(in_c, out_c, kernel_size=3, stride=2,
-                                   padding=1, output_padding=1)
+                nn.ConvTranspose2d(in_c, out_c, kernel_size=10, stride=2,
+                                   padding=4, output_padding=1)
             )
             if not is_last:
                 dec_layers += [
                     nn.BatchNorm2d(out_c),
-                    nn.LeakyReLU(0.2, inplace=True),
+                    nn.SiLU(),
                     nn.Dropout2d(dropout),
                 ]
         self.dec_conv = nn.Sequential(*dec_layers)

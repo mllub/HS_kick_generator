@@ -170,7 +170,7 @@ def main():
     parser.add_argument("--data",       default="data/processed/kicks.pt")
     parser.add_argument("--out",        default="outputs/vae",     help="Checkpoint directory")
     parser.add_argument("--mode",       default="vae",             choices=["ae", "vae_fixed", "vae"])
-    parser.add_argument("--latent-dim", type=int,   default=128)
+    parser.add_argument("--latent-dim", type=int,   default=256)
     parser.add_argument("--epochs",     type=int,   default=200)
     parser.add_argument("--batch-size", type=int,   default=64)
     parser.add_argument("--lr",         type=float, default=1e-3)
