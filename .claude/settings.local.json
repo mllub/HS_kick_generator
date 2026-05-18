@@ -8,10 +8,17 @@
       "Bash(git lfs *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(mkdir -p \"C:\\\\Users\\\\Menno\\\\hardstyle-kick-rave\\\\kickgen\" \"C:\\\\Users\\\\Menno\\\\hardstyle-kick-rave\\\\examples\" \"C:\\\\Users\\\\Menno\\\\hardstyle-kick-rave\\\\tests\")",
+      "Bash(/c/Users/Menno/anaconda3/envs/hs-kick/Scripts/pip.exe install *)",
+      "Bash(py -c ' *)",
+      "Read(//usr/**)",
+      "Read(//usr/local/**)",
+      "Bash(python3 -c ' *)"
     ],
     "additionalDirectories": [
-      "C:\\Users\\Menno\\hardstyle-kick-rave\\scripts"
+      "C:\\Users\\Menno\\hardstyle-kick-rave\\scripts",
+      "C:\\Users\\Menno\\hardstyle-kick-rave"
     ]
   }
 }

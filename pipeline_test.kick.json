@@ -1,0 +1,107 @@
+{
+  "master_gain_db": 0.0,
+  "use_limiter": true,
+  "channels": [
+    {
+      "name": "tail",
+      "pan": 0.0,
+      "gain_db": 0.0,
+      "blocks": [
+        {
+          "type": "KickSynth",
+          "name": "kick",
+          "params": {
+            "start_freq": 179.6,
+            "end_freq": 40.0,
+            "sweep_time": 0.03388,
+            "sweep_curve": 2.0,
+            "length": 1.5586,
+            "attack_ms": 5.8884,
+            "decay_ms": 441.05,
+            "click_level": 0.205,
+            "click_decay_ms": 5.0
+          }
+        },
+        {
+          "type": "ParametricEQ",
+          "name": "parametriceq_2",
+          "params": {
+            "band_0_freq": 999.02,
+            "band_0_gain_db": 24.0,
+            "band_0_Q": 0.1,
+            "band_0_type": 0.0,
+            "band_1_freq": 1278.74,
+            "band_1_gain_db": 24.0,
+            "band_1_Q": 0.7039,
+            "band_1_type": 0.0,
+            "band_2_freq": 8891.12,
+            "band_2_gain_db": 24.0,
+            "band_2_Q": 6.4162,
+            "band_2_type": 2.0,
+            "band_3_freq": 1000.0,
+            "band_3_gain_db": 0.0,
+            "band_3_Q": 1.0,
+            "band_3_type": 0.0
+          }
+        },
+        {
+          "type": "Waveshaper",
+          "name": "waveshaper_1",
+          "params": {
+            "drive": 29.227,
+            "bias": -0.15300000000000002,
+            "mix": 1.0,
+            "shape": 0.0
+          }
+        },
+        {
+          "type": "Reverb",
+          "name": "reverb_3",
+          "params": {
+            "room_size": 0.30610000000000004,
+            "decay": 0.8360299999999999,
+            "damping": 0.99,
+            "pre_delay_ms": 48.199999999999996,
+            "mix": 0.101
+          }
+        },
+        {
+          "type": "MultibandCompressor",
+          "name": "multibandcompressor_5",
+          "params": {
+            "xover_0_hz": 200.0,
+            "xover_1_hz": 2000.0,
+            "band_0_threshold_db": -18.0,
+            "band_0_ratio": 4.0,
+            "band_0_attack_ms": 10.0,
+            "band_0_release_ms": 100.0,
+            "band_0_knee_db": 6.0,
+            "band_0_makeup_db": 14.027999999999999,
+            "band_1_threshold_db": -18.0,
+            "band_1_ratio": 4.0,
+            "band_1_attack_ms": 10.0,
+            "band_1_release_ms": 100.0,
+            "band_1_knee_db": 6.0,
+            "band_1_makeup_db": 6.0,
+            "band_2_threshold_db": -18.0,
+            "band_2_ratio": 4.0,
+            "band_2_attack_ms": 10.0,
+            "band_2_release_ms": 100.0,
+            "band_2_knee_db": 6.0,
+            "band_2_makeup_db": 6.0
+          }
+        },
+        {
+          "type": "Waveshaper",
+          "name": "waveshaper_4",
+          "params": {
+            "drive": 19.5712,
+            "bias": 0.0,
+            "mix": 1.0,
+            "shape": 0.0
+          }
+        }
+      ]
+    }
+  ]
+}
