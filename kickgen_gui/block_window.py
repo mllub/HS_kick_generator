@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -12,6 +14,26 @@ from PySide6.QtWidgets import (
     QWidget,
     QHBoxLayout,
 )
+
+
+def _is_freq_param(name: str) -> bool:
+    lo = name.lower()
+    return "freq" in lo or "_hz" in lo or lo.endswith("hz")
+
+
+def _val_to_pos(val: float, lo: float, hi: float, log: bool) -> int:
+    if log:
+        t = (math.log10(max(val, lo)) - math.log10(lo)) / (math.log10(hi) - math.log10(lo))
+    else:
+        t = (val - lo) / (hi - lo)
+    return int(round(max(0.0, min(1.0, t)) * 1000))
+
+
+def _pos_to_val(pos: int, lo: float, hi: float, log: bool) -> float:
+    t = pos / 1000.0
+    if log:
+        return 10.0 ** (math.log10(lo) + t * (math.log10(hi) - math.log10(lo)))
+    return lo + t * (hi - lo)
 
 
 class BlockWindow(QWidget):
@@ -77,6 +99,7 @@ class BlockWindow(QWidget):
             elif isinstance(bound, tuple) and len(bound) == 2:
                 # --- Continuous parameter: slider + spinbox ---
                 min_val, max_val = float(bound[0]), float(bound[1])
+                use_log = _is_freq_param(param_name) and min_val > 0.0
                 step = (max_val - min_val) / 1000.0
 
                 row_widget = QWidget()
@@ -96,20 +119,19 @@ class BlockWindow(QWidget):
                 # Set initial value
                 fval = float(current_value)
                 fval = max(min_val, min(max_val, fval))
-                slider_pos = int(round((fval - min_val) / (max_val - min_val) * 1000))
-                slider.setValue(slider_pos)
+                slider.setValue(_val_to_pos(fval, min_val, max_val, use_log))
                 spinbox.setValue(fval)
 
                 row_layout.addWidget(slider)
                 row_layout.addWidget(spinbox)
 
                 # Wire up sync + parameter update
-                def make_continuous_handlers(pname, sl, sb, lo, hi):
+                def make_continuous_handlers(pname, sl, sb, lo, hi, log_scale):
                     def on_slider_changed(pos):
                         if self._guard:
                             return
                         self._guard = True
-                        val = lo + (pos / 1000.0) * (hi - lo)
+                        val = _pos_to_val(pos, lo, hi, log_scale)
                         sb.setValue(val)
                         self.block.set_params(**{pname: val})
                         self.params_changed.emit()
@@ -119,9 +141,7 @@ class BlockWindow(QWidget):
                         if self._guard:
                             return
                         self._guard = True
-                        pos = int(round((val - lo) / (hi - lo) * 1000))
-                        pos = max(0, min(1000, pos))
-                        sl.setValue(pos)
+                        sl.setValue(_val_to_pos(val, lo, hi, log_scale))
                         self.block.set_params(**{pname: val})
                         self.params_changed.emit()
                         self._guard = False
@@ -129,7 +149,7 @@ class BlockWindow(QWidget):
                     sl.valueChanged.connect(on_slider_changed)
                     sb.valueChanged.connect(on_spinbox_changed)
 
-                make_continuous_handlers(param_name, slider, spinbox, min_val, max_val)
+                make_continuous_handlers(param_name, slider, spinbox, min_val, max_val, use_log)
                 self._widgets[param_name] = row_widget
                 layout.addRow(QLabel(param_name), row_widget)
 
@@ -157,12 +177,11 @@ class BlockWindow(QWidget):
                 widget.setCurrentIndex(index)
             elif isinstance(bound, tuple):
                 min_val, max_val = float(bound[0]), float(bound[1])
-                # widget is a QWidget container; find child slider and spinbox
+                use_log = _is_freq_param(param_name) and min_val > 0.0
                 sl = widget.findChild(QSlider)
                 sb = widget.findChild(QDoubleSpinBox)
                 if sl is not None and sb is not None:
                     fval = max(min_val, min(max_val, float(current_value)))
-                    pos = int(round((fval - min_val) / (max_val - min_val) * 1000))
-                    sl.setValue(pos)
+                    sl.setValue(_val_to_pos(fval, min_val, max_val, use_log))
                     sb.setValue(fval)
         self._guard = False

@@ -21,6 +21,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import copy
+
+import soundfile as sf  # type: ignore[import]
+
 from kickgen.channel import Channel
 from kickgen.pipeline import Pipeline
 from kickgen_gui.audio import RenderWorker, play_audio
@@ -83,6 +87,31 @@ class ChannelCard(QFrame):
             layout.addWidget(lbl)
 
         layout.addStretch()
+
+        btn_row = QWidget()
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(4)
+
+        self._mute_btn = QPushButton("Mute")
+        self._mute_btn.setCheckable(True)
+        self._mute_btn.setChecked(channel.muted)
+        self._mute_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #777; border-radius: 3px; padding: 2px 6px; }"
+            "QPushButton:checked { background-color: #cc4444; color: white; border-color: #ff6666; }"
+        )
+        self._mute_btn.clicked.connect(self._on_mute_clicked)
+        btn_layout.addWidget(self._mute_btn)
+
+        dupe_btn = QPushButton("Duplicate")
+        dupe_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #777; border-radius: 3px; padding: 2px 6px; }"
+        )
+        dupe_btn.clicked.connect(self._on_duplicate_clicked)
+        btn_layout.addWidget(dupe_btn)
+
+        layout.addWidget(btn_row)
+
         self._refresh()
 
     def _refresh(self) -> None:
@@ -91,6 +120,16 @@ class ChannelCard(QFrame):
         self._gain_label.setText(f"Gain: {self.channel.gain_db:+.1f} dB")
         n = len(self.channel.blocks)
         self._blocks_label.setText(f"{n} block{'s' if n != 1 else ''}")
+        self._mute_btn.setChecked(self.channel.muted)
+
+    def _on_mute_clicked(self, checked: bool) -> None:
+        self.channel.muted = checked
+        self.pipeline_window._set_status(
+            f"{self.channel_name}: {'muted' if checked else 'unmuted'}"
+        )
+
+    def _on_duplicate_clicked(self) -> None:
+        self.pipeline_window.duplicate_channel(self.channel_name)
 
     def refresh(self) -> None:
         """Public refresh — called by PipelineWindow when the channel changes."""
@@ -114,6 +153,8 @@ class PipelineWindow(QMainWindow):
         self.pipeline = pipeline
         self._open_channel_windows: dict[str, ChannelWindow] = {}
         self._worker: RenderWorker | None = None
+        self._export_worker: RenderWorker | None = None
+        self._export_path: str = ""
 
         self.setWindowTitle("KickGen")
         self.resize(900, 480)
@@ -135,6 +176,12 @@ class PipelineWindow(QMainWindow):
         self._play_btn = QPushButton("▶  Generate && Play")
         self._play_btn.clicked.connect(self.generate_and_play)
         toolbar.addWidget(self._play_btn)
+
+        toolbar.addSeparator()
+
+        self._export_btn = QPushButton("Export WAV")
+        self._export_btn.clicked.connect(self.export_wav)
+        toolbar.addWidget(self._export_btn)
 
         toolbar.addSeparator()
 
@@ -258,9 +305,48 @@ class PipelineWindow(QMainWindow):
         except Exception as exc:
             self._set_status(f"Playback error: {exc}")
         self._play_btn.setEnabled(True)
+        self._export_btn.setEnabled(True)
 
     def _on_render_error(self, msg: str) -> None:
         self._set_status(f"Error: {msg}")
+        self._play_btn.setEnabled(True)
+        self._export_btn.setEnabled(True)
+
+    # ---------------------------------------------------------------------- #
+    # Export WAV
+    # ---------------------------------------------------------------------- #
+
+    def export_wav(self) -> None:
+        if self._export_worker is not None and self._export_worker.isRunning():
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export WAV",
+            "kick.wav",
+            "WAV files (*.wav);;All Files (*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".wav"):
+            path += ".wav"
+        self._export_path = path
+        self._export_btn.setEnabled(False)
+        self._play_btn.setEnabled(False)
+        self._set_status("Rendering for export…")
+
+        self._export_worker = RenderWorker(self.pipeline, length_seconds=2.0, sr=44100)
+        self._export_worker.finished.connect(self._on_export_done)
+        self._export_worker.error.connect(self._on_render_error)
+        self._export_worker.start()
+
+    def _on_export_done(self, audio) -> None:
+        try:
+            sf.write(self._export_path, audio, 44100, subtype="PCM_24")
+            self._set_status(f"Exported: {self._export_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Error", str(exc))
+            self._set_status("Export failed")
+        self._export_btn.setEnabled(True)
         self._play_btn.setEnabled(True)
 
     def _set_status(self, text: str) -> None:
@@ -284,6 +370,38 @@ class PipelineWindow(QMainWindow):
         new_channel = Channel([], pan=0.0, gain_db=0.0)
         self.pipeline.channels.append((name, new_channel))
         self._rebuild_cards()
+
+    def duplicate_channel(self, source_name: str) -> None:
+        source = self._find_channel(source_name)
+        if source is None:
+            return
+
+        default_name = f"{source_name}_copy"
+        # Auto-increment if the default name is already taken
+        existing = {n for n, _ in self.pipeline.channels}
+        if default_name in existing:
+            i = 2
+            while f"{source_name}_copy{i}" in existing:
+                i += 1
+            default_name = f"{source_name}_copy{i}"
+
+        name, ok = QInputDialog.getText(
+            self, "Duplicate Channel", "New channel name:", text=default_name
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if self._find_channel(name) is not None:
+            QMessageBox.warning(self, "Duplicate", f"Channel '{name}' already exists.")
+            return
+
+        new_channel = copy.deepcopy(source)
+
+        # Insert immediately after the source channel
+        idx = next(i for i, (n, _) in enumerate(self.pipeline.channels) if n == source_name)
+        self.pipeline.channels.insert(idx + 1, (name, new_channel))
+        self._rebuild_cards()
+        self._set_status(f"Duplicated '{source_name}' → '{name}'")
 
     def remove_channel(self) -> None:
         if not self.pipeline.channels:

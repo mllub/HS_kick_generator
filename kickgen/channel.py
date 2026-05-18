@@ -32,10 +32,12 @@ class Channel:
         blocks: list[tuple[str, Block]],
         pan: float = 0.0,
         gain_db: float = 0.0,
+        muted: bool = False,
     ) -> None:
         self.blocks: list[tuple[str, Block]] = list(blocks)
         self.pan = float(pan)
         self.gain_db = float(gain_db)
+        self.muted = bool(muted)
 
     # ------------------------------------------------------------------
     # Processing
@@ -54,6 +56,9 @@ class Channel:
         n_samples:
             Number of samples to render.
         """
+        if self.muted:
+            return np.zeros(n_samples, dtype=np.float32)
+
         audio = np.zeros(n_samples, dtype=np.float32)
         for _name, block in self.blocks:
             audio = block.process(audio, sr)

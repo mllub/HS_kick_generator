@@ -357,7 +357,7 @@ class ParametricEQ(Block):
         bounds: dict = {}
         for n in range(self.n_bands):
             bounds[f"band_{n}_freq"] = (20.0, 20000.0)
-            bounds[f"band_{n}_gain_db"] = (-24.0, 24.0)
+            bounds[f"band_{n}_gain_db"] = (-40.0, 40.0)
             bounds[f"band_{n}_Q"] = (0.1, 10.0)
             bounds[f"band_{n}_type"] = ["peak", "low_shelf", "high_shelf"]
         return bounds
@@ -693,12 +693,13 @@ class MultibandCompressor(Block):
 
 
 # ---------------------------------------------------------------------------
-# Reverb (Schroeder)
+# Reverb (Freeverb-style)
 # ---------------------------------------------------------------------------
 
-_COMB_DELAYS = [1557, 1617, 1491, 1422]
-_ALLPASS_DELAYS = [225, 341]
-_ALLPASS_COEF = 0.7
+# Freeverb standard delay lengths at 44100 Hz (Jezar at Dreampoint)
+_COMB_DELAYS = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
+_ALLPASS_DELAYS = [556, 441, 341, 225]
+_ALLPASS_COEF = 0.5
 
 
 @_njit
@@ -740,7 +741,11 @@ def _allpass_filter(audio: np.ndarray, delay: int, coef: float) -> np.ndarray:
 
 
 class Reverb(Block):
-    """Schroeder reverb: 4 parallel combs + 2 series allpass filters.
+    """Freeverb-style reverb: 8 parallel combs + 4 series allpass filters.
+
+    Uses the Freeverb algorithm (Jezar at Dreampoint) — 8 comb filters with
+    prime-spaced delay lengths give a smooth, metallic-free spectral response,
+    followed by 4 allpass stages for diffusion.
 
     Parameters
     ----------
@@ -749,7 +754,7 @@ class Reverb(Block):
     decay:
         Overall reverb decay (affects comb feedback gain).
     damping:
-        High-frequency damping in comb feedback (0 = no damping).
+        High-frequency damping in comb feedback (0 = bright, 1 = dark).
     pre_delay_ms:
         Pre-delay in milliseconds.
     mix:
@@ -791,14 +796,14 @@ class Reverb(Block):
         scale = self.room_size * sr / 44100.0
         feedback = 0.9 * self.decay
 
-        # 4 parallel comb filters
+        # 8 parallel comb filters (Freeverb delay lengths)
         wet = np.zeros_like(dry)
         for base_delay in _COMB_DELAYS:
             d = max(1, int(base_delay * scale))
             wet += _comb_filter(delayed_input, d, feedback, self.damping)
-        wet *= 0.25  # average
+        wet *= 1.0 / len(_COMB_DELAYS)
 
-        # 2 series allpass filters
+        # 4 series allpass filters for diffusion
         for base_delay in _ALLPASS_DELAYS:
             d = max(1, int(base_delay * scale))
             wet = _allpass_filter(wet, d, _ALLPASS_COEF)

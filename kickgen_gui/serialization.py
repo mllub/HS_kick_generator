@@ -30,6 +30,7 @@ def save_pipeline(pipeline: Pipeline, path: str) -> None:
                 "name": ch_name,
                 "pan": channel.pan,
                 "gain_db": channel.gain_db,
+                "muted": channel.muted,
                 "blocks": blocks_data,
             }
         )
@@ -76,6 +77,7 @@ def load_pipeline(path: str) -> Pipeline:
             blocks,
             pan=float(ch_data.get("pan", 0.0)),
             gain_db=float(ch_data.get("gain_db", 0.0)),
+            muted=bool(ch_data.get("muted", False)),
         )
         channels.append((ch_data["name"], channel))
 
