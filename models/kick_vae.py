@@ -6,17 +6,47 @@ from typing import Literal
 ModeType = Literal["ae", "vae_fixed", "vae"]
 
 
+# ── Building blocks ───────────────────────────────────────────────────────────
+
+class _ResBlock(nn.Module):
+    """Pre-activation residual block: (Norm→SiLU→Conv)×2 + skip connection.
+
+    When in_ch != out_ch a 1×1 conv aligns the shortcut; otherwise it is a
+    plain identity wire with no extra parameters.
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, dropout: float = 0.05) -> None:
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.GroupNorm(min(32, in_ch), in_ch),
+            nn.SiLU(),
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
+            nn.GroupNorm(min(32, out_ch), out_ch),
+            nn.SiLU(),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
+        )
+        self.skip = (
+            nn.Conv2d(in_ch, out_ch, kernel_size=1)
+            if in_ch != out_ch else nn.Identity()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x) + self.skip(x)
+
+
+# ── KickVAE ───────────────────────────────────────────────────────────────────
+
 class KickVAE(nn.Module):
     """
-    Fully-convolutional VAE on 2D log-mel spectrograms.
+    Fully-convolutional VAE on 2D log-mel spectrograms, with residual blocks.
 
-    The bottleneck is a pair of 1×1 convolutions (conv_mu / conv_logvar) that
-    map the deepest encoder feature map to *latent_dim* channels — no flatten,
-    no linear layer.  The latent code z therefore retains spatial structure:
-        shape  (B, latent_dim, H_bot, W_bot)
-    where H_bot × W_bot is the feature-map size after all stride-2 encoder
-    convolutions.  conv_dec maps z back to enc_channels[-1] channels before
-    the transposed-conv decoder stack.
+    Each encoder stage: stride-2 Conv (downsample) → ResBlock.
+    Each decoder stage: stride-2 ConvTranspose (upsample) → ResBlock.
+    Bottleneck: 1×1 conv_mu / conv_logvar → latent z (spatial tensor) → conv_dec.
+
+    Using kernel=4, stride=2, padding=1 gives exact ×2 spatial scaling with no
+    rounding artefacts, removing the need for the bilinear resize at the end.
 
     mode:
         "ae"        — AE; mu used directly as z, no KL term.
@@ -27,7 +57,7 @@ class KickVAE(nn.Module):
     def __init__(
         self,
         mode: ModeType = "vae",
-        latent_dim: int = 64,           # latent channels at bottleneck
+        latent_dim: int = 64,
         n_mels: int = 128,
         n_frames: int = 69,
         enc_channels: list[int] = [64, 128, 256, 512],
@@ -41,46 +71,45 @@ class KickVAE(nn.Module):
         self.n_frames = n_frames
 
         # ── Encoder ───────────────────────────────────────────────────────
-        enc_layers: list[nn.Module] = []
+        # Each stage: stride-2 conv (channel change + downsample) + ResBlock
+        enc_stages: list[nn.Module] = []
         in_ch = 1
         for out_ch in enc_channels:
-            enc_layers += [
-                nn.Conv2d(in_ch, out_ch, kernel_size=10, stride=2, padding=4),
-                nn.BatchNorm2d(out_ch),
-                nn.SiLU(),
-                nn.Dropout2d(dropout),
-            ]
+            enc_stages.append(nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=4, stride=2, padding=1),
+                _ResBlock(out_ch, out_ch, dropout),
+            ))
             in_ch = out_ch
-        self.enc_conv = nn.Sequential(*enc_layers)
+        self.enc_stages = nn.ModuleList(enc_stages)
 
-        # ── 1×1 conv bottleneck (fully convolutional, no FC) ──────────────
+        # ── 1×1 conv bottleneck ───────────────────────────────────────────
         self.conv_mu     = nn.Conv2d(enc_channels[-1], latent_dim, kernel_size=1)
         self.conv_logvar = nn.Conv2d(enc_channels[-1], latent_dim, kernel_size=1)
         self.conv_dec    = nn.Conv2d(latent_dim, enc_channels[-1], kernel_size=1)
 
         # ── Decoder ───────────────────────────────────────────────────────
-        dec_in_ch  = list(reversed(enc_channels))   # [512, 256, 128, 64]
-        dec_out_ch = dec_in_ch[1:] + [1]            # [256, 128, 64,   1]
+        # Each stage: stride-2 ConvTranspose (upsample) + ResBlock
+        # Final stage goes to 1 channel (output) — no ResBlock on that layer.
+        dec_in_ch  = list(reversed(enc_channels))        # [512, 256, 128, 64]
+        dec_out_ch = dec_in_ch[1:] + [enc_channels[0]]   # [256, 128,  64, 64]
 
-        dec_layers: list[nn.Module] = []
-        for i, (in_c, out_c) in enumerate(zip(dec_in_ch, dec_out_ch)):
-            is_last = i == len(dec_in_ch) - 1
-            dec_layers.append(
-                nn.ConvTranspose2d(in_c, out_c, kernel_size=10, stride=2,
-                                   padding=4, output_padding=1)
-            )
-            if not is_last:
-                dec_layers += [
-                    nn.BatchNorm2d(out_c),
-                    nn.SiLU(),
-                    nn.Dropout2d(dropout),
-                ]
-        self.dec_conv = nn.Sequential(*dec_layers)
+        dec_stages: list[nn.Module] = []
+        for in_c, out_c in zip(dec_in_ch, dec_out_ch):
+            dec_stages.append(nn.Sequential(
+                nn.ConvTranspose2d(in_c, out_c, kernel_size=4, stride=2, padding=1),
+                _ResBlock(out_c, out_c, dropout),
+            ))
+        self.dec_stages = nn.ModuleList(dec_stages)
+
+        # Final projection to 1 output channel
+        self.dec_out = nn.Conv2d(enc_channels[0], 1, kernel_size=3, padding=1)
 
     # ── Forward passes ────────────────────────────────────────────────────
 
     def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        h = self.enc_conv(x)                    # (B, C_enc, H_bot, W_bot)
+        h = x
+        for stage in self.enc_stages:
+            h = stage(h)
         return self.conv_mu(h), self.conv_logvar(h)
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -92,9 +121,11 @@ class KickVAE(nn.Module):
         return mu + std * torch.randn_like(mu)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.conv_dec(z)                    # (B, C_enc, H_bot, W_bot)
-        out = self.dec_conv(h)
-        # Bilinear resize handles any rounding from strided convolutions
+        h = self.conv_dec(z)
+        for stage in self.dec_stages:
+            h = stage(h)
+        out = self.dec_out(h)
+        # Bilinear resize handles any residual rounding from the conv chain
         return F.interpolate(out, size=(self.n_mels, self.n_frames),
                              mode="bilinear", align_corners=False)
 
