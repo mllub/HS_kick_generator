@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-rsync -avz --progress --partial \
-    -e "ssh -p 31523" \
+scp -P 19195 \
     "C:/Users/Menno/hardstyle-kick-rave/data/processed/kicks.pt" \
-    root@ssh9.vast.ai:/workspace/HS_kick_generator/data/processed/
+    root@ssh1.vast.ai:/workspace/HS_kick_generator/data/processed/

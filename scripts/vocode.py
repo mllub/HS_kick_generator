@@ -23,6 +23,7 @@ import argparse
 from pathlib import Path
 
 import torch
+from torch.utils.data import TensorDataset, random_split
 import soundfile as sf
 import torchaudio.transforms as T
 
@@ -96,9 +97,9 @@ def main():
     parser.add_argument("--ckpt-dir",    default="outputs/vae",     help="Directory to search for latest checkpoint")
     parser.add_argument("--data",        default="data/processed/kicks.pt", help="kicks.pt — used for norm stats and reconstruction mode")
     parser.add_argument("--out",         default="outputs/audio",   help="Output directory for WAV files")
-    parser.add_argument("--n",           type=int, default=8,       help="Number of samples to generate")
-    parser.add_argument("--latent-dim",  type=int, default=64)
-    parser.add_argument("--reconstruct", action="store_true",       help="Encode then decode training samples instead of random sampling")
+    parser.add_argument("--n",           type=int,   default=8,     help="Number of samples per output set")
+    parser.add_argument("--latent-dim",  type=int,   default=64)
+    parser.add_argument("--val-split",   type=float, default=0.1,   help="Validation fraction — must match training (default 0.1)")
     parser.add_argument("--mode",        default=None,              choices=["ae", "vae_fixed", "vae"],
                         help="Override mode (default: read from checkpoint)")
     args = parser.parse_args()
@@ -140,6 +141,17 @@ def main():
         print(f"Data not found: {data_path}  (needed for normalisation stats)")
         sys.exit(1)
     waveforms = torch.load(data_path, weights_only=True)   # (N, 1, T)
+
+    # Reproduce the same train/val split used during training
+    n_val   = max(1, int(len(waveforms) * args.val_split))
+    n_train = len(waveforms) - n_val
+    _, val_ds = random_split(
+        TensorDataset(waveforms), [n_train, n_val],
+        generator=torch.Generator().manual_seed(42),
+    )
+    val_waveforms = torch.stack([val_ds[i][0] for i in range(len(val_ds))])
+    print(f"  Val set : {len(val_waveforms)} samples  (train: {n_train})")
+
     n_frames  = None
 
     mel_tf = build_mel_transform(device)
@@ -157,14 +169,6 @@ def main():
     model = KickVAE(mode=mode, latent_dim=latent_dim, n_mels=N_MELS, n_frames=n_frames).to(device)
     model.load_state_dict(state_dict)
     model.eval()
-
-    # Determine bottleneck shape for random generation (fully-convolutional model:
-    # latent z is 4D, not a flat vector)
-    with torch.no_grad():
-        _dummy = torch.zeros(1, 1, N_MELS, n_frames, device=device)
-        _mu, _ = model.encode(_dummy)
-        bottleneck_shape = tuple(_mu.shape[1:])   # (latent_dim, H_bot, W_bot)
-    print(f"  Bottleneck : {bottleneck_shape}")
 
     # ── Vocoder ───────────────────────────────────────────────────────────
     fb_pinv, griffin_lim = build_vocoder(mel_tf, device)
@@ -184,28 +188,31 @@ def main():
             print(f"  Saved {out_path}")
 
     with torch.no_grad():
-        # Pick 8 random dataset samples — used for both orig and recon
-        indices = torch.randperm(len(waveforms))[: args.n]
-        batch   = waveforms[indices].to(device)
+        # Gather training waveforms (complement of val set)
+        train_waveforms = torch.stack([
+            waveforms[i] for i in range(len(waveforms))
+            if i not in set(val_ds.indices)
+        ])
 
-        # Save originals
-        print(f"\nSaving {args.n} original samples ...")
-        for i, wav in enumerate(batch):
-            audio = wav.squeeze(0).cpu().numpy()
-            peak  = abs(audio).max().clip(1e-9)
-            sf.write(str(out_dir / f"kick_orig_{i:03d}.wav"), audio / peak * 0.9, TARGET_SR)
-            print(f"  Saved kick_orig_{i:03d}.wav")
+        def reconstruct(batch_waveforms: torch.Tensor, tag: str) -> None:
+            n = min(args.n, len(batch_waveforms))
+            indices = torch.randperm(len(batch_waveforms))[:n]
+            batch = batch_waveforms[indices].to(device)
 
-        # Reconstruction: encode → decode the same samples
-        log_mel = torch.log(mel_tf(batch.squeeze(1)) + LOG_EPS).unsqueeze(1)
-        log_mel = 2 * (log_mel - s_min) / (s_max - s_min + 1e-9) - 1
-        mel_recon, _, _ = model(log_mel)
-        vocode_batch(mel_recon, "recon")
+            print(f"\nSaving {n} {tag} originals ...")
+            for i, wav in enumerate(batch):
+                audio = wav.squeeze(0).cpu().numpy()
+                peak  = abs(audio).max().clip(1e-9)
+                sf.write(str(out_dir / f"kick_{tag}_orig_{i:03d}.wav"), audio / peak * 0.9, TARGET_SR)
+                print(f"  Saved kick_{tag}_orig_{i:03d}.wav")
 
-        # Random generation: z ~ N(0, I) — shape matches bottleneck spatial dims
-        z       = torch.randn(args.n, *bottleneck_shape, device=device)
-        mel_gen = model.decode(z)
-        vocode_batch(mel_gen, "gen")
+            log_mel = torch.log(mel_tf(batch.squeeze(1)) + LOG_EPS).unsqueeze(1)
+            log_mel = 2 * (log_mel - s_min) / (s_max - s_min + 1e-9) - 1
+            mel_recon, _, _ = model(log_mel)
+            vocode_batch(mel_recon, f"{tag}_recon")
+
+        reconstruct(train_waveforms, "train")
+        reconstruct(val_waveforms,   "val")
 
     print(f"\nDone. WAV files written to {out_dir}/")
 

@@ -15,6 +15,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import sys
 import argparse
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -60,6 +61,43 @@ def to_log_mel(waveforms: torch.Tensor, mel_tf: T.MelSpectrogram) -> torch.Tenso
     return specs
 
 
+# ── Keyboard stop helper ──────────────────────────────────────────────────
+
+def _kbhit() -> bool:
+    """Return True if a key has been pressed (non-blocking)."""
+    if os.name == "nt":
+        import msvcrt
+        return msvcrt.kbhit()  # type: ignore[attr-defined]
+    import select
+    return bool(select.select([sys.stdin], [], [], 0)[0])
+
+
+def _getch() -> str:
+    """Read one character from stdin (assumes a key is available)."""
+    if os.name == "nt":
+        import msvcrt
+        return msvcrt.getch().decode("utf-8", errors="ignore")  # type: ignore[attr-defined]
+    return sys.stdin.read(1)
+
+
+@contextmanager
+def _cbreak_stdin():
+    """Put the terminal in cbreak mode so single keypresses are readable.
+
+    Falls back silently if stdin is not a tty (e.g. piped input or Windows).
+    """
+    if os.name == "nt" or not sys.stdin.isatty():
+        yield
+        return
+    import termios, tty
+    old = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+        yield
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+
+
 # ── Live plot ──────────────────────────────────────────────────────────────
 
 class LivePlot:
@@ -75,12 +113,14 @@ class LivePlot:
         self.val_line,   = self.ax_loss.plot([], [], label="Val",   color="tomato")
         self.ax_loss.legend()
         self.ax_loss.set_xticklabels([])
+        self.ax_loss.grid(True, linestyle="--", alpha=0.4)
 
         self.ax_kl.set_xlabel("Epoch")
         self.ax_kl.set_ylabel("KL loss")
         self.train_kl_line, = self.ax_kl.plot([], [], label="Train", color="steelblue")
         self.val_kl_line,   = self.ax_kl.plot([], [], label="Val",   color="tomato")
         self.ax_kl.legend()
+        self.ax_kl.grid(True, linestyle="--", alpha=0.4)
 
         self.fig.tight_layout()
 
@@ -179,7 +219,8 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=0.0,    help="AdamW weight decay")
     parser.add_argument("--beta",       type=float, default=1.0,   help="KL weight (beta-VAE)")
     parser.add_argument("--val-split",  type=float, default=0.1,   help="Fraction of data for validation")
-    parser.add_argument("--plot-every", type=int,   default=5,     help="Update plot every N epochs")
+    parser.add_argument("--plot-every",       type=int, default=5,  help="Save plot every N epochs")
+    parser.add_argument("--checkpoint-every", type=int, default=5,  help="Save checkpoint every N epochs")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -286,24 +327,42 @@ def main():
     plot = LivePlot(chosen_mode, out_dir)
     print(f"\n{'Epoch':>6}  {'Train recon':>12}  {'Train KL':>10}  {'Val recon':>10}  {'Val KL':>8}")
     print("-" * 58)
+    print("  Press SPACE to stop early and save  |  ENTER to save checkpoint now and keep training.\n")
 
     plot.redraw(model, fixed_sample, fixed_val_sample, device)
 
-    for epoch in range(start_epoch, start_epoch + args.epochs):
-        train_recon, train_kl = run_epoch(model, train_loader, optimizer, device, args.beta, train=True)
-        val_recon,   val_kl   = run_epoch(model, val_loader,   optimizer, device, args.beta, train=False)
+    with _cbreak_stdin():
+        for epoch in range(start_epoch, start_epoch + args.epochs):
+            train_recon, train_kl = run_epoch(model, train_loader, optimizer, device, args.beta, train=True)
+            val_recon,   val_kl   = run_epoch(model, val_loader,   optimizer, device, args.beta, train=False)
 
-        print(f"{epoch:>6}  {train_recon:>12.6f}  {train_kl:>10.6f}  {val_recon:>10.6f}  {val_kl:>8.6f}")
+            print(f"{epoch:>6}  {train_recon:>12.6f}  {train_kl:>10.6f}  {val_recon:>10.6f}  {val_kl:>8.6f}")
 
-        plot.record(epoch, train_recon, val_recon, train_kl, val_kl)
-        if epoch % args.plot_every == 0:
-            plot.redraw(model, fixed_sample, fixed_val_sample, device)
-            torch.save({
-                "epoch": epoch,
-                "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "args": vars(args),
-            }, out_dir / f"kick_vae_ep{epoch:04d}.pt")
+            plot.record(epoch, train_recon, val_recon, train_kl, val_kl)
+            if epoch % args.plot_every == 0:
+                plot.redraw(model, fixed_sample, fixed_val_sample, device)
+            if epoch % args.checkpoint_every == 0:
+                torch.save({
+                    "epoch": epoch,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "args": vars(args),
+                }, out_dir / f"kick_vae_ep{epoch:04d}.pt")
+
+            if _kbhit():
+                ch = _getch()
+                if ch == " ":
+                    print("\n  Spacebar pressed — stopping early.")
+                    break
+                elif ch in ("\r", "\n"):
+                    print(f"\n  Enter pressed — saving checkpoint at epoch {epoch}.")
+                    plot.redraw(model, fixed_sample, fixed_val_sample, device)
+                    torch.save({
+                        "epoch": epoch,
+                        "model_state": model.state_dict(),
+                        "optimizer_state": optimizer.state_dict(),
+                        "args": vars(args),
+                    }, out_dir / f"kick_vae_ep{epoch:04d}.pt")
 
     torch.save(model.state_dict(), out_dir / "kick_vae_final.pt")
     print(f"\nSaved final model → {out_dir / 'kick_vae_final.pt'}")
