@@ -191,26 +191,66 @@ def process_audio(input_path: Path) -> np.ndarray:
 
 def main():
     parser = argparse.ArgumentParser(description="Preprocess kick samples for training")
-    parser.add_argument("--input", default="data/raw", help="Directory with raw kick samples")
+    parser.add_argument("--input",     default="data/raw",      help="Directory with raw kick samples")
+    parser.add_argument("--prepared",  default=None,            help="Path to kicks_prepared.npy — skips per-file processing")
     parser.add_argument("--processed", default="data/processed", help="Output dir for processed WAVs")
-    parser.add_argument("--no-augment", action="store_true",
-                        help="Skip data augmentation")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for augmentation")
+    parser.add_argument("--no-augment", action="store_true",    help="Skip data augmentation")
+    parser.add_argument("--seed", type=int, default=42,         help="Random seed for augmentation")
     args = parser.parse_args()
 
-    input_dir = Path(args.input)
     processed_dir = Path(args.processed)
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    extensions = {".wav", ".mp3", ".flac", ".aiff", ".aif", ".ogg"}
-    files = sorted(f for f in input_dir.rglob("*") if f.suffix.lower() in extensions)
+    global_rng = np.random.default_rng(args.seed)
+    errors     = 0
+    all_audio: list[np.ndarray] = []
+    orig_audio: list[np.ndarray] = []
 
-    if not files:
-        print(f"No audio files found in {input_dir}")
-        sys.exit(1)
+    if args.prepared:
+        # ── Fast path: load pre-processed numpy array ──────────────────────
+        npy_path = Path(args.prepared)
+        if not npy_path.exists():
+            print(f"Prepared file not found: {npy_path}")
+            sys.exit(1)
+        raw = np.load(str(npy_path))   # (N, T) float32
+        orig_audio = list(raw)
+        all_audio  = list(raw)
+        processed  = len(orig_audio)
+        print(f"Loaded {processed} prepared samples from {npy_path}")
+    else:
+        # ── Normal path: read raw audio files ─────────────────────────────
+        input_dir = Path(args.input)
+        extensions = {".wav", ".mp3", ".flac", ".aiff", ".aif", ".ogg"}
+        files = sorted(f for f in input_dir.rglob("*") if f.suffix.lower() in extensions)
 
-    print(f"Found {len(files)} audio file(s) in {input_dir}")
+        if not files:
+            print(f"No audio files found in {input_dir}")
+            sys.exit(1)
+
+        print(f"Found {len(files)} audio file(s) in {input_dir}")
+
+        n_workers   = os.cpu_count() or 1
+        worker_args = [(i, f, args.seed, False) for i, f in enumerate(files, 1)]
+
+        results: dict[int, tuple[str, np.ndarray | None, list]] = {}
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_process_file, a): a[0] for a in worker_args}
+            for future in as_completed(futures):
+                idx, fname, audio, variants, err = future.result()
+                if err:
+                    print(f"  [{idx:3d}/{len(files)}] ERROR {fname}: {err}")
+                    errors += 1
+                else:
+                    print(f"  [{idx:3d}/{len(files)}] {fname}")
+                results[idx] = (fname, audio, variants)
+
+        for i in range(1, len(files) + 1):
+            _, audio, _ = results[i]
+            if audio is not None:
+                orig_audio.append(audio)
+                all_audio.append(audio)
+
+        processed = len(orig_audio)
 
     if not args.no_augment:
         answer = input("Run augmentation? (10 EQ/clip + 5 tok+tail variants per file) [y/n]: ").strip().lower()
@@ -219,48 +259,21 @@ def main():
 
     save_wavs = input("Save processed WAV files to disk? [y/n]: ").strip().lower() == "y"
 
-    aug_label = "disabled" if args.no_augment else "10 EQ/clip + 5 tok+tail variants per file"
-    n_workers = os.cpu_count() or 1
-    print(f"Processing {len(files)} files → max {TARGET_SAMPLES} samples (0.45 s) @ {TARGET_SR} Hz  (augmentation: {aug_label})  [workers: {n_workers}]")
-    errors = 0
-    all_audio  = []
-    orig_audio = []   # originals only — used for tok+tail pool
-    global_rng = np.random.default_rng(args.seed)
-
-    worker_args = [
-        (i, f, args.seed, not args.no_augment)
-        for i, f in enumerate(files, 1)
-    ]
-
-    # results keyed by file index so we preserve deterministic order
-    results: dict[int, tuple[str, np.ndarray | None, list]] = {}
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_process_file, a): a[0] for a in worker_args}
-        for future in as_completed(futures):
-            idx, fname, audio, variants, err = future.result()
-            if err:
-                print(f"  [{idx:3d}/{len(files)}] ERROR {fname}: {err}")
-                errors += 1
-            else:
-                print(f"  [{idx:3d}/{len(files)}] {fname}")
-            results[idx] = (fname, audio, variants)
-
-    # Reassemble in original file order
-    for i, f in enumerate(files, 1):
-        fname, audio, variants = results[i]
-        if audio is None:
-            continue
-        stem = f.stem
-        all_audio.append(audio)
-        orig_audio.append(audio)
-        if save_wavs:
-            sf.write(str(processed_dir / f"{stem}.wav"), audio, TARGET_SR, subtype="PCM_24")
-        for suffix, aug_audio in variants:
-            all_audio.append(aug_audio)
-            if save_wavs:
-                sf.write(str(processed_dir / f"{stem}{suffix}.wav"), aug_audio, TARGET_SR, subtype="PCM_24")
-
-    processed = len(files) - errors
+    # ── Augmentation ──────────────────────────────────────────────────────
+    if not args.no_augment:
+        aug_label = "10 EQ/clip + 5 tok+tail variants per file"
+        print(f"\nAugmenting {processed} samples  ({aug_label}) ...")
+        for i, audio in enumerate(orig_audio, 1):
+            file_rng = np.random.default_rng(args.seed + i)
+            for suffix, aug_audio in augment(audio, TARGET_SR, file_rng):
+                all_audio.append(aug_audio)
+                if save_wavs:
+                    sf.write(str(processed_dir / f"sample_{i:04d}{suffix}.wav"),
+                             aug_audio, TARGET_SR, subtype="PCM_24")
+    elif save_wavs:
+        for i, audio in enumerate(orig_audio, 1):
+            sf.write(str(processed_dir / f"sample_{i:04d}.wav"),
+                     audio, TARGET_SR, subtype="PCM_24")
 
     # Tok+tail augmentation — requires the full pool of originals
     tt_count = 0
