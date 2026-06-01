@@ -34,8 +34,8 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 
 TARGET_SR = 44100
-N_MELS    = 128
-N_FFT     = 1024
+N_MELS    = 256
+N_FFT     = 2048
 HOP       = 256
 N_STFT    = N_FFT // 2 + 1
 LOG_EPS   = 1e-9

@@ -18,9 +18,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from kickgen.blocks import KickSynth
 from kickgen.channel import Channel
 from kickgen.registry import BLOCK_REGISTRY
 from kickgen_gui.block_window import BlockWindow
+from kickgen_gui.kicksynth_window import KickSynthWindow
 
 
 class ChannelWindow(QWidget):
@@ -211,7 +213,10 @@ class ChannelWindow(QWidget):
         idx = self._block_list.row(item)
         if 0 <= idx < len(self.channel.blocks):
             blk_name, block = self.channel.blocks[idx]
-            win = BlockWindow(block, blk_name, parent=self)
+            if isinstance(block, KickSynth):
+                win = KickSynthWindow(block, blk_name, parent=self)
+            else:
+                win = BlockWindow(block, blk_name, parent=self)
             win.params_changed.connect(self.channel_changed)
             win.show()
             self._open_windows.append(win)

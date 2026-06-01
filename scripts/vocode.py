@@ -97,7 +97,7 @@ def main():
     parser.add_argument("--data",        default="data/processed/kicks.pt", help="kicks.pt — used for norm stats and reconstruction mode")
     parser.add_argument("--out",         default="outputs/audio",   help="Output directory for WAV files")
     parser.add_argument("--n",           type=int, default=8,       help="Number of samples to generate")
-    parser.add_argument("--latent-dim",  type=int, default=128)
+    parser.add_argument("--latent-dim",  type=int, default=64)
     parser.add_argument("--reconstruct", action="store_true",       help="Encode then decode training samples instead of random sampling")
     parser.add_argument("--mode",        default=None,              choices=["ae", "vae_fixed", "vae"],
                         help="Override mode (default: read from checkpoint)")
@@ -158,6 +158,14 @@ def main():
     model.load_state_dict(state_dict)
     model.eval()
 
+    # Determine bottleneck shape for random generation (fully-convolutional model:
+    # latent z is 4D, not a flat vector)
+    with torch.no_grad():
+        _dummy = torch.zeros(1, 1, N_MELS, n_frames, device=device)
+        _mu, _ = model.encode(_dummy)
+        bottleneck_shape = tuple(_mu.shape[1:])   # (latent_dim, H_bot, W_bot)
+    print(f"  Bottleneck : {bottleneck_shape}")
+
     # ── Vocoder ───────────────────────────────────────────────────────────
     fb_pinv, griffin_lim = build_vocoder(mel_tf, device)
 
@@ -194,8 +202,8 @@ def main():
         mel_recon, _, _ = model(log_mel)
         vocode_batch(mel_recon, "recon")
 
-        # Random generation: z ~ N(0, I)
-        z       = torch.randn(args.n, latent_dim, device=device)
+        # Random generation: z ~ N(0, I) — shape matches bottleneck spatial dims
+        z       = torch.randn(args.n, *bottleneck_shape, device=device)
         mel_gen = model.decode(z)
         vocode_batch(mel_gen, "gen")
 

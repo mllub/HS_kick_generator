@@ -8,21 +8,26 @@ ModeType = Literal["ae", "vae_fixed", "vae"]
 
 class KickVAE(nn.Module):
     """
-    Convolutional VAE operating on 2D log-mel spectrograms of kick drums.
+    Fully-convolutional VAE on 2D log-mel spectrograms.
+
+    The bottleneck is a pair of 1×1 convolutions (conv_mu / conv_logvar) that
+    map the deepest encoder feature map to *latent_dim* channels — no flatten,
+    no linear layer.  The latent code z therefore retains spatial structure:
+        shape  (B, latent_dim, H_bot, W_bot)
+    where H_bot × W_bot is the feature-map size after all stride-2 encoder
+    convolutions.  conv_dec maps z back to enc_channels[-1] channels before
+    the transposed-conv decoder stack.
 
     mode:
-        "ae"        — regular autoencoder; mu is used directly as latent code,
-                      no KL term
-        "vae_fixed" — VAE with fixed unit variance (logvar clamped to 0);
-                      KL = 0.5 * sum(mu^2)
-        "vae"       — full VAE; both mu and logvar are learned;
-                      KL = -0.5 * sum(1 + logvar - mu^2 - exp(logvar))
+        "ae"        — AE; mu used directly as z, no KL term.
+        "vae_fixed" — VAE with unit variance; KL = 0.5 * mean(mu²).
+        "vae"       — full VAE; both mu and logvar learned.
     """
 
     def __init__(
         self,
         mode: ModeType = "vae",
-        latent_dim: int = 128,
+        latent_dim: int = 64,           # latent channels at bottleneck
         n_mels: int = 128,
         n_frames: int = 69,
         enc_channels: list[int] = [64, 128, 256, 512],
@@ -35,7 +40,7 @@ class KickVAE(nn.Module):
         self.n_mels = n_mels
         self.n_frames = n_frames
 
-        # --- Encoder conv blocks ---
+        # ── Encoder ───────────────────────────────────────────────────────
         enc_layers: list[nn.Module] = []
         in_ch = 1
         for out_ch in enc_channels:
@@ -48,25 +53,18 @@ class KickVAE(nn.Module):
             in_ch = out_ch
         self.enc_conv = nn.Sequential(*enc_layers)
 
-        # Compute flattened encoder output size via a dummy forward pass
-        with torch.no_grad():
-            dummy = torch.zeros(1, 1, n_mels, n_frames)
-            enc_out = self.enc_conv(dummy)
-            self._enc_shape = tuple(enc_out.shape[1:])   # (C, H, W)
-            flat_size = enc_out.numel()
+        # ── 1×1 conv bottleneck (fully convolutional, no FC) ──────────────
+        self.conv_mu     = nn.Conv2d(enc_channels[-1], latent_dim, kernel_size=1)
+        self.conv_logvar = nn.Conv2d(enc_channels[-1], latent_dim, kernel_size=1)
+        self.conv_dec    = nn.Conv2d(latent_dim, enc_channels[-1], kernel_size=1)
 
-        self.fc_mu     = nn.Linear(flat_size, latent_dim)
-        self.fc_logvar = nn.Linear(flat_size, latent_dim)
-
-        # --- Decoder FC + conv blocks ---
-        self.fc_dec = nn.Linear(latent_dim, flat_size)
-
-        dec_in_channels = list(reversed(enc_channels))       # e.g. [512, 256, 128, 64]
-        dec_out_channels = dec_in_channels[1:] + [1]          # e.g. [256, 128, 64, 1]
+        # ── Decoder ───────────────────────────────────────────────────────
+        dec_in_ch  = list(reversed(enc_channels))   # [512, 256, 128, 64]
+        dec_out_ch = dec_in_ch[1:] + [1]            # [256, 128, 64,   1]
 
         dec_layers: list[nn.Module] = []
-        for i, (in_c, out_c) in enumerate(zip(dec_in_channels, dec_out_channels)):
-            is_last = i == len(dec_in_channels) - 1
+        for i, (in_c, out_c) in enumerate(zip(dec_in_ch, dec_out_ch)):
+            is_last = i == len(dec_in_ch) - 1
             dec_layers.append(
                 nn.ConvTranspose2d(in_c, out_c, kernel_size=10, stride=2,
                                    padding=4, output_padding=1)
@@ -79,39 +77,35 @@ class KickVAE(nn.Module):
                 ]
         self.dec_conv = nn.Sequential(*dec_layers)
 
-    # ------------------------------------------------------------------
+    # ── Forward passes ────────────────────────────────────────────────────
 
     def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        h = self.enc_conv(x).flatten(1)
-        return self.fc_mu(h), self.fc_logvar(h)
+        h = self.enc_conv(x)                    # (B, C_enc, H_bot, W_bot)
+        return self.conv_mu(h), self.conv_logvar(h)
 
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         if self.mode == "ae" or not self.training:
             return mu
         if self.mode == "vae_fixed":
-            return mu + torch.randn_like(mu)   # logvar ignored, unit gaussian
+            return mu + torch.randn_like(mu)
         std = torch.exp(0.5 * logvar)
         return mu + std * torch.randn_like(mu)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.fc_dec(z).view(z.size(0), *self._enc_shape)
+        h = self.conv_dec(z)                    # (B, C_enc, H_bot, W_bot)
         out = self.dec_conv(h)
-        # Resize to exact input shape — handles rounding differences from strided convs
-        out = F.interpolate(out, size=(self.n_mels, self.n_frames),
-                            mode="bilinear", align_corners=False)
-        return out
+        # Bilinear resize handles any rounding from strided convolutions
+        return F.interpolate(out, size=(self.n_mels, self.n_frames),
+                             mode="bilinear", align_corners=False)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
-        recon = self.decode(z)
-        return recon, mu, logvar
+        return self.decode(z), mu, logvar
 
     def kl_loss(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         if self.mode == "ae":
             return torch.zeros(1, device=mu.device).squeeze()
         if self.mode == "vae_fixed":
-            # logvar exists but is ignored — KL against N(0,1) with unit variance
             return 0.5 * mu.pow(2).mean()
-        # Full VAE: KL = -0.5 * mean(1 + logvar - mu^2 - exp(logvar))
         return -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).mean()

@@ -22,9 +22,7 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader, random_split
 import torchaudio.transforms as T
 import matplotlib
-import os as _os
-_has_display = bool(_os.environ.get("DISPLAY") or _os.name == "nt")
-matplotlib.use("TkAgg" if _has_display else "Agg")
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -66,10 +64,7 @@ def to_log_mel(waveforms: torch.Tensor, mel_tf: T.MelSpectrogram) -> torch.Tenso
 
 class LivePlot:
     def __init__(self, mode: str, out_dir: Path):
-        self.interactive = _has_display
         self.out_dir = out_dir
-        if self.interactive:
-            plt.ion()
         self.fig, axes = plt.subplots(2, 3, figsize=(16, 8))
         (self.ax_loss, self.ax_orig,     self.ax_recon), \
         (self.ax_blank, self.ax_val_orig, self.ax_val_recon) = axes
@@ -127,14 +122,10 @@ class LivePlot:
 
         model.train()
         self.fig.tight_layout()
-        if self.interactive:
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
-        else:
-            epoch = self.epochs[-1] if self.epochs else 0
-            plot_path = self.out_dir / f"plot_ep{epoch:04d}.png"
-            self.fig.savefig(plot_path, dpi=100)
-            print(f"  Plot saved → {plot_path}")
+        epoch = self.epochs[-1] if self.epochs else 0
+        plot_path = self.out_dir / f"plot_ep{epoch:04d}.png"
+        self.fig.savefig(plot_path, dpi=100)
+        print(f"  Plot saved → {plot_path}")
 
 
 # ── Training loop ──────────────────────────────────────────────────────────
@@ -166,7 +157,8 @@ def main():
     parser.add_argument("--data",       default="data/processed/kicks.pt")
     parser.add_argument("--out",        default="outputs/vae",     help="Checkpoint directory")
     parser.add_argument("--mode",       default="vae",             choices=["ae", "vae_fixed", "vae"])
-    parser.add_argument("--latent-dim", type=int,   default=256)
+    parser.add_argument("--latent-dim", type=int,   default=64,
+                        help="Latent channels at bottleneck (fully-conv model)")
     parser.add_argument("--epochs",     type=int,   default=200)
     parser.add_argument("--batch-size", type=int,   default=64)
     parser.add_argument("--lr",           type=float, default=1e-3)
@@ -178,6 +170,11 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device : {device}")
+    if device.type == "cpu":
+        n_threads = os.cpu_count() or 1
+        torch.set_num_threads(n_threads)
+        torch.set_num_interop_threads(n_threads)
+        print(f"CPU threads : {n_threads}")
     print(f"Mode   : {args.mode}")
 
     # ── Load data ──────────────────────────────────────────────────────────
@@ -276,6 +273,8 @@ def main():
     print(f"\n{'Epoch':>6}  {'Train recon':>12}  {'Train KL':>10}  {'Val recon':>10}  {'Val KL':>8}")
     print("-" * 58)
 
+    plot.redraw(model, fixed_sample, fixed_val_sample, device)
+
     for epoch in range(start_epoch, start_epoch + args.epochs):
         train_recon, train_kl = run_epoch(model, train_loader, optimizer, device, args.beta, train=True)
         val_recon,   val_kl   = run_epoch(model, val_loader,   optimizer, device, args.beta, train=False)
@@ -294,12 +293,9 @@ def main():
 
     torch.save(model.state_dict(), out_dir / "kick_vae_final.pt")
     print(f"\nSaved final model → {out_dir / 'kick_vae_final.pt'}")
-    if _has_display:
-        plt.ioff()
-        plt.show()
-    else:
-        plot.fig.savefig(out_dir / "plot_final.png", dpi=100)
-        print(f"Final plot saved → {out_dir / 'plot_final.png'}")
+    plot.fig.savefig(out_dir / "plot_final.png", dpi=100)
+    print(f"Final plot saved → {out_dir / 'plot_final.png'}")
+    plt.close(plot.fig)
 
 
 if __name__ == "__main__":

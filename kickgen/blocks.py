@@ -98,142 +98,193 @@ class Gain(Block):
 # KickSynth
 # ---------------------------------------------------------------------------
 
+N_ENV_PTS = 4   # envelope points for both pitch and amplitude envelopes
+N_HARMONICS = 6  # harmonics above the fundamental (2nd … 7th)
+
+
 class KickSynth(Block):
     """Synthesize a kick drum from scratch (ignores audio input).
 
-    Generates a pitched sine sweep with an amplitude envelope plus an
-    optional white-noise click transient.
+    Generates a pitched sine with up to six harmonics.  Both the pitch and
+    amplitude envelopes are piecewise-linear, each defined by N_ENV_PTS
+    (time, value) knot points that are sorted internally before use.
 
-    Parameters
-    ----------
-    start_freq:
-        Sweep start frequency in Hz.
-    end_freq:
-        Sweep end frequency in Hz.
-    sweep_time:
-        Duration of the frequency sweep in seconds.
-    sweep_curve:
-        Exponent controlling sweep curvature (higher = faster initial drop).
-    length:
-        Total output duration in seconds.
-    attack_ms:
-        Linear amplitude attack time in milliseconds.
-    decay_ms:
-        Exponential decay time-constant in milliseconds.
-    click_level:
-        Amplitude of noise click transient (0 = off).
-    click_decay_ms:
-        Decay time-constant for click transient in milliseconds.
+    Pitch envelope
+    --------------
+    Each knot ``pitch_pt_N_v`` is a normalised value in [0, 1].  The actual
+    frequency at that point is ``pitch_pt_N_v * freq_scale``.
+
+    Amplitude envelope
+    ------------------
+    Each knot ``amp_pt_N_v`` is an amplitude in [0, 1].
+
+    Harmonics
+    ---------
+    ``harm_N_amp`` and ``harm_N_phase`` (degrees) for harmonics 2–7 above the
+    fundamental.  All amplitudes default to 0 (harmonics silent).
     """
 
-    _DEFAULTS: dict[str, float] = {
-        "start_freq": 150.0,
-        "end_freq": 40.0,
-        "sweep_time": 0.5,
-        "sweep_curve": 2.0,
-        "length": 1.0,
-        "attack_ms": 2.0,
-        "decay_ms": 400.0,
-        "click_level": 0.2,
-        "click_decay_ms": 5.0,
-    }
+    _N_ENV_PTS = N_ENV_PTS
+    _N_HARMONICS = N_HARMONICS
 
-    _BOUNDS: dict[str, tuple[float, float]] = {
-        "start_freq": (20.0, 8000.0),
-        "end_freq": (20.0, 500.0),
-        "sweep_time": (0.01, 2.0),
-        "sweep_curve": (0.5, 8.0),
-        "length": (0.1, 4.0),
-        "attack_ms": (0.1, 50.0),
-        "decay_ms": (50.0, 4000.0),
-        "click_level": (0.0, 1.0),
-        "click_decay_ms": (0.5, 30.0),
-    }
+    # Default knot points — (time_s, value)
+    _DEFAULT_PITCH: list[list[float]] = [
+        [0.000, 1.00],
+        [0.080, 0.35],
+        [0.300, 0.20],
+        [1.000, 0.18],
+    ]
+    _DEFAULT_AMP: list[list[float]] = [
+        [0.000, 0.00],
+        [0.004, 1.00],
+        [0.200, 0.60],
+        [1.000, 0.00],
+    ]
 
     def __init__(
         self,
-        start_freq: float = 150.0,
-        end_freq: float = 40.0,
-        sweep_time: float = 0.5,
-        sweep_curve: float = 2.0,
+        freq_scale: float = 150.0,
         length: float = 1.0,
-        attack_ms: float = 2.0,
-        decay_ms: float = 400.0,
-        click_level: float = 0.2,
-        click_decay_ms: float = 5.0,
+        pitch_pts: list[list[float]] | None = None,
+        amp_pts: list[list[float]] | None = None,
+        harmonics: list[list[float]] | None = None,
     ) -> None:
-        self.start_freq = float(start_freq)
-        self.end_freq = float(end_freq)
-        self.sweep_time = float(sweep_time)
-        self.sweep_curve = float(sweep_curve)
+        self.freq_scale = float(freq_scale)
         self.length = float(length)
-        self.attack_ms = float(attack_ms)
-        self.decay_ms = float(decay_ms)
-        self.click_level = float(click_level)
-        self.click_decay_ms = float(click_decay_ms)
+
+        # Deep-copy defaults so instances don't share mutable state
+        import copy
+        self._pitch_pts: list[list[float]] = (
+            copy.deepcopy(pitch_pts) if pitch_pts is not None
+            else copy.deepcopy(self._DEFAULT_PITCH)
+        )
+        self._amp_pts: list[list[float]] = (
+            copy.deepcopy(amp_pts) if amp_pts is not None
+            else copy.deepcopy(self._DEFAULT_AMP)
+        )
+        # [[amp, phase_deg], ...]
+        self._harmonics: list[list[float]] = (
+            copy.deepcopy(harmonics) if harmonics is not None
+            else [[0.0, 0.0] for _ in range(self._N_HARMONICS)]
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers exposed for the GUI
+    # ------------------------------------------------------------------
+
+    def sorted_pitch_pts(self) -> list[tuple[float, float]]:
+        """Return pitch knots sorted by time as (t, v) tuples."""
+        return sorted((p[0], p[1]) for p in self._pitch_pts)
+
+    def sorted_amp_pts(self) -> list[tuple[float, float]]:
+        """Return amplitude knots sorted by time as (t, v) tuples."""
+        return sorted((p[0], p[1]) for p in self._amp_pts)
+
+    # ------------------------------------------------------------------
+    # DSP
+    # ------------------------------------------------------------------
 
     def process(self, audio: np.ndarray, sr: int) -> np.ndarray:  # noqa: ARG002
         n = int(self.length * sr)
         t = np.arange(n, dtype=np.float64) / sr
 
-        # Frequency envelope: compute sweep only where t < sweep_time to avoid
-        # negative-base power warnings from np.where evaluating both branches.
-        ratio = np.clip(1.0 - t / self.sweep_time, 0.0, 1.0)
-        freq = self.end_freq + (self.start_freq - self.end_freq) * ratio ** self.sweep_curve
-        freq = np.where(t >= self.sweep_time, self.end_freq, freq)
+        # Pin endpoint times so they are always valid regardless of how params
+        # were set (e.g. by the optimizer or deserialized from an old file).
+        self._pitch_pts[0][0] = 0.0
+        self._pitch_pts[-1][0] = self.length
+        self._amp_pts[0][0] = 0.0
+        self._amp_pts[-1][0] = self.length
 
-        # Phase via cumulative sum
-        phase = np.cumsum(freq) / sr * 2.0 * np.pi
-        sine = np.sin(phase)
+        # --- Pitch envelope ---
+        pts = self.sorted_pitch_pts()
+        p_times = [p[0] for p in pts]
+        p_vals  = [p[1] for p in pts]
+        freq = np.interp(t, p_times, p_vals) * self.freq_scale
+        freq = np.maximum(freq, 0.5)   # guard against 0 Hz
 
-        # Amplitude envelope
-        attack_samples = max(1, int(self.attack_ms * sr / 1000.0))
-        amp = np.empty(n, dtype=np.float64)
-        # Linear attack
-        amp[:attack_samples] = np.linspace(0.0, 1.0, attack_samples)
-        # Exponential decay after attack
-        if n > attack_samples:
-            decay_tc = self.decay_ms * sr / 1000.0
-            decay_t = np.arange(n - attack_samples, dtype=np.float64)
-            amp[attack_samples:] = np.exp(-decay_t / decay_tc)
+        # --- Phase via integration ---
+        phase = np.cumsum(2.0 * np.pi * freq / sr)
 
-        body = sine * amp
+        # --- Fundamental + harmonics ---
+        body = np.sin(phase)
+        for i, (h_amp, h_phase_deg) in enumerate(self._harmonics):
+            if h_amp > 1e-6:
+                harmonic_num = i + 2   # 2nd, 3rd, … 7th harmonic
+                h_phase_rad = math.radians(h_phase_deg)
+                body = body + h_amp * np.sin(harmonic_num * phase + h_phase_rad)
 
-        # Click transient
-        if self.click_level > 0.0:
-            click_tc = self.click_decay_ms * sr / 1000.0
-            click_env = np.exp(-t / (self.click_decay_ms / 1000.0))
-            rng = np.random.default_rng(0)
-            noise = rng.standard_normal(n)
-            body = body + self.click_level * noise * click_env
+        # --- Amplitude envelope ---
+        apts = self.sorted_amp_pts()
+        a_times = [p[0] for p in apts]
+        a_vals  = [p[1] for p in apts]
+        amp_env = np.interp(t, a_times, a_vals)
+        body = body * amp_env
 
-        # Peak-normalize
+        # --- Peak-normalise ---
         peak = np.max(np.abs(body))
         if peak > 1e-9:
             body = body / peak
 
         return body.astype(np.float32)
 
+    # ------------------------------------------------------------------
+    # Param interface
+    # ------------------------------------------------------------------
+
     def get_params(self) -> dict[str, float]:
-        return {
-            "start_freq": self.start_freq,
-            "end_freq": self.end_freq,
-            "sweep_time": self.sweep_time,
-            "sweep_curve": self.sweep_curve,
+        params: dict[str, float] = {
+            "freq_scale": self.freq_scale,
             "length": self.length,
-            "attack_ms": self.attack_ms,
-            "decay_ms": self.decay_ms,
-            "click_level": self.click_level,
-            "click_decay_ms": self.click_decay_ms,
         }
+        for i, (t, v) in enumerate(self._pitch_pts):
+            params[f"pitch_pt_{i}_t"] = t
+            params[f"pitch_pt_{i}_v"] = v
+        for i, (t, v) in enumerate(self._amp_pts):
+            params[f"amp_pt_{i}_t"] = t
+            params[f"amp_pt_{i}_v"] = v
+        for i, (amp, phase) in enumerate(self._harmonics):
+            params[f"harm_{i}_amp"]   = amp
+            params[f"harm_{i}_phase"] = phase
+        return params
 
     def set_params(self, **kwargs: float) -> None:
         for k, v in kwargs.items():
-            if hasattr(self, k):
-                setattr(self, k, float(v))
+            if k == "freq_scale":
+                self.freq_scale = float(v)
+            elif k == "length":
+                self.length = float(v)
+            elif k.startswith("pitch_pt_"):
+                # pitch_pt_N_t  or  pitch_pt_N_v
+                parts = k.split("_")   # ["pitch","pt","N","t/v"]
+                idx, field = int(parts[2]), parts[3]
+                if 0 <= idx < len(self._pitch_pts):
+                    self._pitch_pts[idx][0 if field == "t" else 1] = float(v)
+            elif k.startswith("amp_pt_"):
+                parts = k.split("_")   # ["amp","pt","N","t/v"]
+                idx, field = int(parts[2]), parts[3]
+                if 0 <= idx < len(self._amp_pts):
+                    self._amp_pts[idx][0 if field == "t" else 1] = float(v)
+            elif k.startswith("harm_"):
+                parts = k.split("_")   # ["harm","N","amp/phase"]
+                idx, field = int(parts[1]), parts[2]
+                if 0 <= idx < len(self._harmonics):
+                    self._harmonics[idx][0 if field == "amp" else 1] = float(v)
 
-    def param_bounds(self) -> dict[str, tuple[float, float]]:
-        return dict(self._BOUNDS)
+    def param_bounds(self) -> dict[str, Any]:
+        bounds: dict[str, Any] = {
+            "freq_scale": (20.0, 1000.0),
+            "length":     (0.1,  4.0),
+        }
+        for i in range(self._N_ENV_PTS):
+            bounds[f"pitch_pt_{i}_t"] = (0.0, 4.0)
+            bounds[f"pitch_pt_{i}_v"] = (0.0, 1.0)
+        for i in range(self._N_ENV_PTS):
+            bounds[f"amp_pt_{i}_t"] = (0.0, 4.0)
+            bounds[f"amp_pt_{i}_v"] = (0.0, 1.0)
+        for i in range(self._N_HARMONICS):
+            bounds[f"harm_{i}_amp"]   = (0.0,    1.0)
+            bounds[f"harm_{i}_phase"] = (-180.0, 180.0)
+        return bounds
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,9 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +35,7 @@ except ImportError:
     sys.exit(1)
 
 TARGET_SR = 44100
-TARGET_SAMPLES = int(TARGET_SR * 0.4)  # 17640 samples
+TARGET_SAMPLES = int(TARGET_SR * 0.45)  # 19845 samples
 
 
 def detect_onset_sample(audio: np.ndarray, sr: int, pre_roll_ms: float = 2.0) -> int:
@@ -157,14 +159,33 @@ def augment(audio: np.ndarray, sr: int, rng: np.random.Generator) -> list[tuple[
     return variants
 
 
-def process_audio(input_path: Path, target_samples: int) -> np.ndarray:
+def _process_file(
+    args: tuple[int, Path, int, bool],
+) -> tuple[int, str, np.ndarray | None, list[tuple[str, np.ndarray]], str]:
+    """Worker executed in a subprocess for one file.
+
+    Returns (index, filename, audio_or_None, aug_variants, error_msg).
+    """
+    i, path, seed, do_augment = args
+    try:
+        audio = process_audio(path)
+        variants: list[tuple[str, np.ndarray]] = []
+        if do_augment:
+            rng = np.random.default_rng(seed + i)
+            variants = augment(audio, TARGET_SR, rng)
+        return i, path.name, audio, variants, ""
+    except Exception as exc:
+        return i, path.name, None, [], str(exc)
+
+
+def process_audio(input_path: Path) -> np.ndarray:
     audio, _ = librosa.load(str(input_path), sr=TARGET_SR, mono=True)
     onset = detect_onset_sample(audio, TARGET_SR)
     audio = audio[onset:]
-    if len(audio) >= target_samples:
-        audio = audio[:target_samples]
-    else:
-        audio = np.pad(audio, (0, target_samples - len(audio)), mode="constant")
+    if len(audio) > TARGET_SAMPLES:
+        audio = audio[:TARGET_SAMPLES]
+    elif len(audio) < TARGET_SAMPLES:
+        audio = np.pad(audio, (0, TARGET_SAMPLES - len(audio)), mode="constant")
     return peak_normalize(audio)
 
 
@@ -191,17 +212,6 @@ def main():
 
     print(f"Found {len(files)} audio file(s) in {input_dir}")
 
-    while True:
-        raw = input("Sample duration in seconds (e.g. 0.4): ").strip()
-        try:
-            duration = float(raw)
-            if duration <= 0:
-                raise ValueError
-            break
-        except ValueError:
-            print("  Please enter a positive number.")
-    target_samples = int(TARGET_SR * duration)
-
     if not args.no_augment:
         answer = input("Run augmentation? (10 EQ/clip + 5 tok+tail variants per file) [y/n]: ").strip().lower()
         if answer != "y":
@@ -210,31 +220,45 @@ def main():
     save_wavs = input("Save processed WAV files to disk? [y/n]: ").strip().lower() == "y"
 
     aug_label = "disabled" if args.no_augment else "10 EQ/clip + 5 tok+tail variants per file"
-    print(f"Processing {len(files)} files → {target_samples} samples ({duration} s) @ {TARGET_SR} Hz  (augmentation: {aug_label})")
+    n_workers = os.cpu_count() or 1
+    print(f"Processing {len(files)} files → max {TARGET_SAMPLES} samples (0.45 s) @ {TARGET_SR} Hz  (augmentation: {aug_label})  [workers: {n_workers}]")
     errors = 0
     all_audio  = []
     orig_audio = []   # originals only — used for tok+tail pool
     global_rng = np.random.default_rng(args.seed)
 
+    worker_args = [
+        (i, f, args.seed, not args.no_augment)
+        for i, f in enumerate(files, 1)
+    ]
+
+    # results keyed by file index so we preserve deterministic order
+    results: dict[int, tuple[str, np.ndarray | None, list]] = {}
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(_process_file, a): a[0] for a in worker_args}
+        for future in as_completed(futures):
+            idx, fname, audio, variants, err = future.result()
+            if err:
+                print(f"  [{idx:3d}/{len(files)}] ERROR {fname}: {err}")
+                errors += 1
+            else:
+                print(f"  [{idx:3d}/{len(files)}] {fname}")
+            results[idx] = (fname, audio, variants)
+
+    # Reassemble in original file order
     for i, f in enumerate(files, 1):
-        try:
-            audio = process_audio(f, target_samples)
-            print(f"  [{i:3d}/{len(files)}] {f.name}")
-            all_audio.append(audio)
-            orig_audio.append(audio)
-
+        fname, audio, variants = results[i]
+        if audio is None:
+            continue
+        stem = f.stem
+        all_audio.append(audio)
+        orig_audio.append(audio)
+        if save_wavs:
+            sf.write(str(processed_dir / f"{stem}.wav"), audio, TARGET_SR, subtype="PCM_24")
+        for suffix, aug_audio in variants:
+            all_audio.append(aug_audio)
             if save_wavs:
-                sf.write(str(processed_dir / f"{f.stem}.wav"), audio, TARGET_SR, subtype="PCM_24")
-
-            if not args.no_augment:
-                file_rng = np.random.default_rng(args.seed + i)
-                for suffix, aug_audio in augment(audio, TARGET_SR, file_rng):
-                    all_audio.append(aug_audio)
-                    if save_wavs:
-                        sf.write(str(processed_dir / f"{f.stem}{suffix}.wav"), aug_audio, TARGET_SR, subtype="PCM_24")
-        except Exception as e:
-            print(f"  [{i:3d}/{len(files)}] ERROR {f.name}: {e}")
-            errors += 1
+                sf.write(str(processed_dir / f"{stem}{suffix}.wav"), aug_audio, TARGET_SR, subtype="PCM_24")
 
     processed = len(files) - errors
 

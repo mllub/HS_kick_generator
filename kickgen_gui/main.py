@@ -4,7 +4,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from kickgen.blocks import Compressor, KickSynth, ParametricEQ, Waveshaper
+from kickgen.blocks import Compressor, KickSynth, ParametricEQ, Waveshaper  # noqa: F401
 from kickgen.channel import Channel
 from kickgen.pipeline import Pipeline
 from kickgen_gui.pipeline_window import PipelineWindow
