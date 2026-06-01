@@ -67,35 +67,49 @@ class LivePlot:
         self.out_dir = out_dir
         self.fig, axes = plt.subplots(2, 3, figsize=(16, 8))
         (self.ax_loss, self.ax_orig,     self.ax_recon), \
-        (self.ax_blank, self.ax_val_orig, self.ax_val_recon) = axes
+        (self.ax_kl,   self.ax_val_orig, self.ax_val_recon) = axes
 
-        self.ax_blank.axis("off")
-
-        self.ax_loss.set_xlabel("Epoch")
-        self.ax_loss.set_ylabel("Reconstruction loss (L1)")
+        self.ax_loss.set_ylabel("Recon loss (L1)")
         self.ax_loss.set_title(f"Loss  —  mode: {mode}")
         self.train_line, = self.ax_loss.plot([], [], label="Train", color="steelblue")
         self.val_line,   = self.ax_loss.plot([], [], label="Val",   color="tomato")
         self.ax_loss.legend()
+        self.ax_loss.set_xticklabels([])
+
+        self.ax_kl.set_xlabel("Epoch")
+        self.ax_kl.set_ylabel("KL loss")
+        self.train_kl_line, = self.ax_kl.plot([], [], label="Train", color="steelblue")
+        self.val_kl_line,   = self.ax_kl.plot([], [], label="Val",   color="tomato")
+        self.ax_kl.legend()
 
         self.fig.tight_layout()
 
-        self.epochs: list[int]         = []
+        self.epochs: list[int]      = []
         self.train_losses: list[float] = []
         self.val_losses:   list[float] = []
+        self.train_kls:    list[float] = []
+        self.val_kls:      list[float] = []
 
-    def record(self, epoch: int, train_recon: float, val_recon: float) -> None:
+    def record(self, epoch: int, train_recon: float, val_recon: float,
+               train_kl: float, val_kl: float) -> None:
         self.epochs.append(epoch)
         self.train_losses.append(train_recon)
         self.val_losses.append(val_recon)
+        self.train_kls.append(train_kl)
+        self.val_kls.append(val_kl)
 
     def redraw(self, model: "KickVAE", train_sample: torch.Tensor,
                val_sample: torch.Tensor, device: torch.device) -> None:
-        # --- loss plot ---
+        # --- loss plots ---
         self.train_line.set_data(self.epochs, self.train_losses)
         self.val_line.set_data(self.epochs, self.val_losses)
         self.ax_loss.relim()
         self.ax_loss.autoscale_view()
+
+        self.train_kl_line.set_data(self.epochs, self.train_kls)
+        self.val_kl_line.set_data(self.epochs, self.val_kls)
+        self.ax_kl.relim()
+        self.ax_kl.autoscale_view()
 
         # --- mel plots ---
         model.eval()
@@ -281,7 +295,7 @@ def main():
 
         print(f"{epoch:>6}  {train_recon:>12.6f}  {train_kl:>10.6f}  {val_recon:>10.6f}  {val_kl:>8.6f}")
 
-        plot.record(epoch, train_recon, val_recon)
+        plot.record(epoch, train_recon, val_recon, train_kl, val_kl)
         if epoch % args.plot_every == 0:
             plot.redraw(model, fixed_sample, fixed_val_sample, device)
             torch.save({
